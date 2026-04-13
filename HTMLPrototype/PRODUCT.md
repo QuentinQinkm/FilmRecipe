@@ -80,7 +80,18 @@ User Input (sliders / spectrum drag on desktop)
 7. **Dye absorption** — Beer-Lambert: complementary hue absorption vectors
 8. **Negative scan** — exponential paper response `1 - exp(-OD * 3.0)`, or raw
    view with orange mask (mask color controlled by `maskHue` 0-60deg)
-9. **Grain** — hash-based noise scaled by crystal size and mid-tone luminance
+9. **Per-layer grain** — physics-based crystal emulation applied at the density
+   stage (before dye absorption), independently per layer:
+   - **Binomial statistics**: `sigma = sqrt(p*(1-p)/N)` where `N = 1/(cs²+0.01)`
+     crystals per cell and `p = density/dmax` is develop probability
+   - **Jittered cell hashing**: breaks grid alignment by offsetting cell centers
+     with per-cell random jitter
+   - **Multi-octave noise**: two crystal scales blended 70/30 for natural size
+     distribution
+   - **Per-layer seeds**: each layer gets an independent hash seed so grain
+     patterns are uncorrelated across layers
+   - Grain IS the density variation (crystal develop/don't-develop), not a
+     post-process overlay
 10. **Gamma encode** — `l2s()`: back to sRGB for display
 
 The WebGL shader supports up to 5 layers via `float[5]` uniform arrays and a
@@ -279,6 +290,11 @@ Both touch and desktop:
 - **Touch-first spectrum** — spectrum is read-only visualization on touch devices.
   Bell curve drag handles are precision mouse tools unsuitable for finger input.
   Sliders in the Layers tab are the primary input for touch users.
+- **Per-layer grain at density stage** — grain is not a post-process noise overlay.
+  Each layer's grain models binomial crystal develop statistics independently,
+  applied before dye absorption. This means color film grain has uncorrelated
+  patterns per color channel (as in real C-41/E-6), and B&W grain character
+  differs naturally from color grain without special-case code.
 
 ## Known Limitations / Future Work
 
