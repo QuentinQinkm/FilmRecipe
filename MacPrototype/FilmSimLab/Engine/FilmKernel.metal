@@ -90,7 +90,6 @@ float layerGrain(float2 pos, float cs, float density, float dm, float seed) {
 // --- Main kernel ---
 extern "C" float4 filmSimulation(
     coreimage::sample_t src,
-    float2 coord,
     float4 peaks_bws,
     float4 peaks_bws2,
     float4 peak_bw4,

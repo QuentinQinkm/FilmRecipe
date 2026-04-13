@@ -21,7 +21,23 @@ struct ImageCanvas: NSViewRepresentable {
             nsView.image = nil
             return
         }
-        guard let cgImage = pipeline.renderToCGImage(image: source, recipe: recipe, rawMode: rawMode) else {
+
+        // Scale source to fit viewport before processing
+        let viewSize = nsView.bounds.size
+        guard viewSize.width > 0 && viewSize.height > 0 else { return }
+
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let targetW = viewSize.width * scale
+        let targetH = viewSize.height * scale
+        let imgW = source.extent.width
+        let imgH = source.extent.height
+
+        let fitScale = min(targetW / imgW, targetH / imgH, 1.0) // never upscale
+        let scaled = fitScale < 1.0
+            ? source.transformed(by: CGAffineTransform(scaleX: fitScale, y: fitScale))
+            : source
+
+        guard let cgImage = pipeline.renderToCGImage(image: scaled, recipe: recipe, rawMode: rawMode) else {
             nsView.image = nil
             return
         }

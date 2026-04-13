@@ -1,6 +1,6 @@
 import { state, cloneTemplate, applyDevelopment, LAB_DEFAULTS } from './state.js';
 import { FilmRenderer } from './engine/renderer.js';
-import { buildTabContent } from './ui/tabs.js';
+import { buildTabContent, syncSliders } from './ui/tabs.js';
 import { buildSpectrum } from './ui/spectrum.js';
 import { initTopbar } from './ui/topbar.js';
 import { initCanvas } from './ui/canvas.js';
@@ -15,7 +15,10 @@ let spectrumHandle = null;
 function mountSpectrum() {
   if (spectrumHandle) spectrumHandle.destroy();
   spectrumHandle = buildSpectrum(spectrumBar, {
-    onInput: renderIfImage,
+    onInput() {
+      syncSliders();
+      renderIfImage();
+    },
     onRebuild: rebuildAndRender,
     onLayerSelect(idx) {
       state.selectedLayerIdx = idx;
@@ -70,7 +73,6 @@ initTopbar({
     state.selectedLayerIdx = 0;
     rebuildAndRender();
   },
-  onModeChange: rebuildTabs,
 });
 
 // Initial state

@@ -569,6 +569,45 @@ input[type="range"]::-moz-range-thumb {
   user-select: none;
 }
 
+/* === Silver/Color toggle === */
+.silver-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.mini-toggle {
+  font-size: 11px;
+}
+
+.mini-toggle .toggle-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.hd-curve-wrap {
+  margin: 4px 0 8px;
+}
+
+.hd-curve-canvas {
+  border-radius: 6px;
+  display: block;
+}
+
+.hd-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  padding: 0 4px;
+}
+
+.hd-label {
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
 /* === Base tab === */
 .section-label {
   font-size: 11px;

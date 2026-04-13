@@ -28,14 +28,14 @@ styles/main.css             Mobile-first CSS with responsive desktop grid
 src/
   main.js                   App bootstrap, tab routing, spectrum mounting, render loop
   state.js                  Data model: stock templates, blank recipe,
-                            control definitions, tonePreset(), complementHue(),
+                            control definitions, complementHue(),
                             applyDevelopment(), app state, localStorage persistence
   engine/
     renderer.js             WebGL (GLSL) rendering engine with up to 5 layers on GPU,
                             Canvas2D CPU fallback only when WebGL unavailable
   ui/
     tabs.js                 3-tab content builder (Layers/Base/Develop)
-    topbar.js               Simple/Pro toggle, Save/Save As buttons, film strip builder
+    topbar.js               Save/Save As buttons, film strip builder
     canvas.js               Tap-to-upload, drag-drop, reference overlay, raw toggle
     spectrum.js             Persistent spectrum visualization: interactive bell curves
                             on desktop (pointer: fine), read-only on touch (pointer: coarse).
@@ -74,13 +74,15 @@ User Input (sliders / spectrum drag on desktop)
    physical stacking). Uses Beer-Lambert dye absorption per layer to attenuate
    `availableLight` top-to-bottom. Stacking always uses pre-reversal density
    (both GPU and CPU paths). Layer order in the array = physical stacking order.
-4. **H&D curve** — toe/gamma/shoulder density response per layer
-5. **Positive reversal** — for slide film: `dmax - density` (applied after stacking)
-6. **DIR inhibition** — inter-layer density suppression (edge sharpness)
-7. **Dye absorption** — Beer-Lambert: complementary hue absorption vectors
-8. **Negative scan** — exponential paper response `1 - exp(-OD * 3.0)`, or raw
+4. **Base + fog (Dmin)** — minimum density of unexposed emulsion added to all
+   density values: `density = fog + hdCurve(exposure)`
+5. **H&D curve** — toe/gamma/shoulder density response per layer, clamped at dmax
+6. **Positive reversal** — for slide film: `dmax - density` (applied after stacking)
+7. **DIR inhibition** — inter-layer density suppression (edge sharpness)
+8. **Dye absorption** — Beer-Lambert: complementary hue absorption vectors
+9. **Negative scan** — exponential paper response `1 - exp(-OD * 3.0)`, or raw
    view with orange mask (mask color controlled by `maskHue` 0-60deg)
-9. **Per-layer grain** — physics-based crystal emulation applied at the density
+10. **Per-layer grain** — physics-based crystal emulation applied at the density
    stage (before dye absorption), independently per layer:
    - **Binomial statistics**: `sigma = sqrt(p*(1-p)/N)` where `N = 1/(cs²+0.01)`
      crystals per cell and `p = density/dmax` is develop probability
@@ -92,7 +94,7 @@ User Input (sliders / spectrum drag on desktop)
      patterns are uncorrelated across layers
    - Grain IS the density variation (crystal develop/don't-develop), not a
      post-process overlay
-10. **Gamma encode** — `l2s()`: back to sRGB for display
+11. **Gamma encode** — `l2s()`: back to sRGB for display
 
 The WebGL shader supports up to 5 layers via `float[5]` uniform arrays and a
 `uLayerCount` uniform. CPU fallback (`_renderCPU`) only activates when WebGL
@@ -107,9 +109,9 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
 - **Negative vs Positive (slide)**: controlled by `reversal` in `global` (0 = C-41
   negative process, 1 = E-6 reversal process). This is a bath process, not a
   per-layer property.
-- **Color vs B&W**: determined by `dyePurity` per layer. `dyePurity < 0.01` = silver
-  halide only (no dye coupler). A film with all layers at `dyePurity < 0.01` renders
-  as B&W. Users can mix color and silver layers freely.
+- **Color vs B&W**: controlled by an emulsion type toggle (Silver / Color dye) per
+  layer. Silver sets `dyePurity = 0` (silver halide only, no dye coupler). A film with
+  all silver layers renders as B&W. Users can mix color and silver layers freely.
 - **Orange mask**: a base property (`maskDensity` in `global`), always available.
   Physically meaningful only for negative film but not gated by film type.
 - **Dye hue**: auto-derived from `sensitizerPeak` via `complementHue()` — the dye
@@ -129,10 +131,11 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
       dyeHue: 185,           // degrees — auto-derived from sensitizerPeak via complementHue()
       dyePurity: 0.70,       // 0-1 — dye coupler presence (0 = silver/B&W, >0 = color)
       dmax: 2.1,             // max optical density
-      hdToe: 0.22,           // H&D shadow compression zone
-      hdGamma: 0.68,         // H&D slope (contrast)
-      hdShoulder: 0.18,      // H&D highlight rolloff zone
-      crystalSize: 0.35,     // grain size factor
+      hdToe: 0.22,           // H&D shadow compression zone width (0-0.5)
+      hdGamma: 0.68,         // H&D slope / contrast (0.3-3.0)
+      hdShoulder: 0.18,      // H&D highlight rolloff zone width (0-0.5)
+      fog: 0.04,             // base + fog (Dmin) — minimum unexposed density (0-0.3)
+      crystalSize: 0.35,     // grain crystal size (0.05-2.0), derives ~ISO
     },
     // ... up to 5 layers
   ],
@@ -159,7 +162,7 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
 - `recipeName` — name of current saved recipe (empty for unsaved)
 - `isDirty` — true when recipe modified since last save/load
 - `savedRecipes` — persisted to `localStorage` under key `filmlab-custom-recipes`
-- `proMode` / `rawMode` / `referenceActive` — UI toggles
+- `rawMode` / `referenceActive` — UI toggles
 
 ### Stock Templates
 
@@ -172,11 +175,96 @@ layers, negative films have `reversal: 0` with color layers.
 
 - `complementHue(wl)` — piecewise linear map from sensitizer wavelength to
   complementary dye hue. Uses SPECTRAL_STOPS lookup + 180deg rotation.
-- `tonePreset(t)` / `toneFromHD(gamma)` — convert between 0-1 tone slider and
-  hdToe/hdGamma/hdShoulder triplet.
 - `applyDevelopment(recipe, lab)` — non-destructive: clones recipe, applies
   developer activity, temperature, time, agitation, freshness effects.
 - `makeDefaultLayer(index)` — creates a new layer with auto-derived dyeHue.
+
+## Parameter Reference
+
+### Per-Layer Parameters
+
+Each layer models one emulsion coating on the film strip. Up to 5 layers stacked.
+
+| Parameter | UI Label | Range | What It Does |
+|-----------|----------|-------|-------------|
+| `sensitizerPeak` | Sensitizer peak | 420-660 nm | Wavelength this layer is most sensitive to. Auto-derives `dyeHue` (complement). Moving peak shifts which colors the layer captures. |
+| `sensitizerBw` | Sensitizer bandwidth | 20-180 nm | FWHM of the Gaussian sensitivity curve. Narrow = selective (saturated color), wide = broad response (desaturated/pastel). |
+| `dyePurity` | Dye purity | 0-1 | Dye coupler concentration. 0 = pure silver halide (B&W grain), >0 = color dye cloud. Controls how strongly the layer forms colored dye vs monochrome silver. Hidden when emulsion type is "Silver". |
+| `dmax` | Dmax | 0.5-4.0 | Maximum optical density the layer can reach. Higher = deeper blacks / more saturated color. Clamps the H&D curve ceiling. |
+| `hdToe` | Toe | 0-0.5 | Width of the shadow compression zone on the H&D curve. Larger toe = softer shadow rolloff, more shadow detail retention. |
+| `hdGamma` | Gamma | 0.3-3.0 | Slope of the H&D curve's linear region. Higher gamma = more contrast. This is the primary contrast control. |
+| `hdShoulder` | Shoulder | 0-0.5 | Width of the highlight compression zone. Larger shoulder = softer highlight rolloff, more highlight headroom before clipping. |
+| `fog` | Base + fog (Dmin) | 0-0.3 | Minimum density of unexposed emulsion. Shifts the entire H&D curve upward. Represents chemical fog and base density. Higher fog = reduced dynamic range, lifted shadows. |
+| `crystalSize` | Crystal size | 0.05-2.0 | Size of silver halide crystals. Larger crystals = more grain but more light-gathering (faster film). Derives approximate ISO: `ISO ≈ 25 × (cs/0.05)^1.1`. |
+| `dyeHue` | (auto) | 0-360° | Complementary hue of the dye formed. Auto-derived from `sensitizerPeak` via `complementHue()`. Not directly editable. |
+
+**Emulsion type toggle:** Silver vs Color dye. Silver sets `dyePurity = 0` and hides
+the dye purity slider. Color dye restores the previous dyePurity value. Silver layers
+produce sharp per-pixel grain; color layers produce softer dye cloud grain (neighborhood-
+averaged). A film with all silver layers renders as B&W.
+
+**ISO readout:** Displayed next to crystal size value (e.g. `0.30 (~ISO 179)`). This is
+a derived display, not a separate parameter. Bigger crystals = faster film = higher ISO.
+
+### Global Parameters
+
+| Parameter | UI Label | Range | What It Does |
+|-----------|----------|-------|-------------|
+| `reversal` | Process | 0 or 1 | 0 = C-41 negative, 1 = E-6 reversal (slide). Reversal inverts density: `dmax - density`. Changes the entire look from negative to positive. |
+| `stackingStrength` | Layer stacking | 0-1 | How much upper layers attenuate light reaching lower layers (Beer-Lambert). 0 = independent layers, 1 = full physical stacking. Affects color cross-talk between layers. |
+| `maskDensity` | Mask density | 0-1 | Orange mask strength (for negative film). Physically compensates for unwanted dye absorptions. Higher = more orange base. |
+| `maskHue` | Mask hue | 0-60° | Shifts the orange mask color from yellow (0) through orange to red-orange (60). |
+| `dirInhibition` | DIR couplers | 0-1 | Developer Inhibitor Releasing coupler strength. Creates inter-layer density suppression at edges, increasing apparent sharpness and reducing color fringing. |
+| `baseTintR/G/B` | Base tint | 0-1 each | RGB tint of the film base itself. Slight warmth (R>G>B) simulates real film base color. |
+
+### Development Parameters (Lab State)
+
+Applied non-destructively via `applyDevelopment()`. These modify the working recipe
+without changing the stored recipe.
+
+| Parameter | UI Label | Effect |
+|-----------|----------|--------|
+| `developerActivity` | Developer activity | Pushes/pulls density and color separation. Positive = push (more contrast), negative = pull (softer). |
+| `bathTemperatureC` | Bath temperature | Higher temp accelerates development (more grain, more contrast). Standard C-41 is 38°C. |
+| `chemistryFreshness` | Chemistry freshness | Exhausted chemistry (lower values) produces more grain and less consistent results. |
+
+### How Parameters Interact
+
+**Sensitivity → Dye color:** `sensitizerPeak` determines what light the layer absorbs.
+`dyeHue` is auto-derived as the complement — a red-sensitive (620nm) layer forms cyan
+dye, green-sensitive (540nm) forms magenta, blue-sensitive (450nm) forms yellow.
+
+**H&D curve shape = toe + gamma + shoulder + fog + dmax:** These five parameters fully
+define the density response curve. Fog lifts the floor (Dmin). Toe and shoulder define
+the curved transition zones. Gamma sets the slope between them. Dmax clamps the ceiling.
+The curve maps log-exposure to density.
+
+**Crystal size → grain + ISO:** Larger crystals gather more light (higher ISO / faster
+film) but produce coarser grain. The grain noise model uses binomial statistics:
+`N = 1/(cs² + 0.01)` crystals per cell. Fewer crystals = more visible randomness.
+
+**dyePurity → grain character:** `dyePurity < 0.01` triggers silver grain (sharp, per-pixel
+noise). Higher purity triggers dye cloud grain (softer, neighborhood-averaged). This
+matches real film: B&W silver grains are individual crystals; color film grain is
+diffused dye clouds around crystal sites.
+
+**Stacking × layer order:** With `stackingStrength > 0`, upper layers (lower array index)
+absorb light via Beer-Lambert before it reaches lower layers. This means layer order
+matters — a dense upper layer dims everything below it, just like physical emulsion
+coatings on a real film strip.
+
+**Reversal flips the density:** In slide film (`reversal = 1`), density is inverted
+(`dmax - density`). This means fog reduces highlight brightness instead of lifting
+shadows. High gamma produces saturated, punchy slides. The same H&D parameters produce
+very different visual results in negative vs reversal mode.
+
+**DIR × multi-layer:** DIR couplers create edge enhancement by suppressing development
+in adjacent layers where density is high. Stronger DIR = sharper apparent edges and
+reduced color cross-contamination between layers.
+
+**Development modifies H&D:** Push processing (high `developerActivity`) increases
+effective gamma and grain. Pull processing decreases contrast. Temperature affects
+development rate. These stack with the recipe's inherent H&D parameters.
 
 ## Unified Recipe Model
 
@@ -185,10 +273,10 @@ it into the working recipe, fully editable. There is no stock vs custom mode spl
 
 ### 3-Tab Layout
 
-- **Layers tab** — Per-layer slider sections with all chemistry controls:
-  Color sensitivity (sensitizerPeak), Sensitivity range (sensitizerBw),
-  Color richness (dyePurity), Max density (dmax), Tone, Grain (crystalSize).
-  Pro mode adds expandable H&D Curve Parameters (toe, gamma, shoulder).
+- **Layers tab** — Per-layer slider sections with chemistry controls:
+  Sensitizer peak, Sensitizer bandwidth, Emulsion type toggle (Silver / Color dye),
+  Dye purity (color only), Dmax, collapsible H&D Curve (interactive canvas with
+  toe/gamma/shoulder drag handles + fog slider), Crystal size with derived ISO readout.
   Layers can be added (up to 5), removed, and reordered. Selected layer is
   highlighted and synced with spectrum pointer.
 - **Base tab** — Global controls (reversal process, stacking, DIR, base tint)
@@ -224,8 +312,7 @@ affordance, "+ New" chip at the end.
 
 ### Topbar
 
-Contains: wordmark, Save button (disabled when no recipe name), Save As button,
-Simple/Pro mode toggle.
+Contains: wordmark, Save button (disabled when no recipe name), Save As button.
 
 ## Spectrum UI (`src/ui/spectrum.js`)
 
@@ -252,6 +339,24 @@ Desktop-only interactions (hidden on `pointer: coarse`):
 
 Both touch and desktop:
 - Tap/click pointer -> selects that layer (`onLayerSelect` callback)
+
+## Interactive H&D Curve Widget (`src/ui/tabs.js`)
+
+Each layer has a collapsible "H&D Curve" section containing an interactive canvas:
+
+- **Canvas drawing** — plots the full H&D characteristic curve with fixed density
+  scale (1/3.5), showing toe region (blue shading), shoulder region (orange shading),
+  fog level (yellow dashed line), and dmax ceiling (red dashed line).
+- **Three drag handles:**
+  - **Toe** (blue, left) — drag horizontally to widen/narrow shadow compression
+  - **Gamma** (white, center) — drag vertically to change contrast slope
+  - **Shoulder** (orange, right) — drag horizontally to widen/narrow highlight rolloff
+- **Dmax clamping** — the curve is visually clamped at the dmax ceiling line. Density
+  values above dmax are flattened, showing the actual effective response.
+- **Fog slider** — inside the H&D details section, updates the fog line on the canvas
+  in real-time.
+- **Fixed scale** — density axis uses `scale = 1/3.5` (not auto-normalized), so
+  changing gamma visibly alters the curve height rather than auto-scaling.
 
 ## Touch-Friendly & Responsive Design
 

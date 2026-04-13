@@ -21,6 +21,7 @@ uniform float uToe[${MAX_LAYERS}];
 uniform float uGamma[${MAX_LAYERS}];
 uniform float uShoulder[${MAX_LAYERS}];
 uniform float uDmax[${MAX_LAYERS}];
+uniform float uFog[${MAX_LAYERS}];
 uniform float uDyeHue[${MAX_LAYERS}];
 uniform float uDyePurity[${MAX_LAYERS}];
 uniform float uCrystal[${MAX_LAYERS}];
@@ -28,6 +29,7 @@ uniform float uDir, uMaskDen, uMaskHue;
 uniform vec3 uBaseTint;
 uniform float uPassthrough;
 uniform float uStackStr;
+uniform vec2 uImgDim;
 
 const vec3 CH = vec3(625.0, 540.0, 450.0);
 const float LN10 = 2.302585;
@@ -77,63 +79,62 @@ vec3 dyeAbs(float hue, float pur) {
   return c * pur;
 }
 
-// --- Physically-motivated grain model ---
+// --- Grain engine v2: per-pixel, resolution-independent ---
 //
-// Real film grain: each emulsion cell contains N silver halide crystals.
-// Each crystal either develops (opaque) or doesn't (transparent) — binary.
-// The smooth "density" from the H&D curve is the statistical expectation.
-// Grain is the binomial variance around that expectation.
-//
-// crystalSize controls:
-//   - Spatial scale of grain clumps (bigger crystals = bigger blobs)
-//   - Crystal count per cell: N ~ 1/cs^2 (fewer big crystals = more variance)
-//
-// Variance follows binomial: sigma = sqrt(p * (1-p) / N)
-//   where p = density/dmax (fraction of crystals developed)
-//   This naturally peaks at mid-density, vanishes at 0 and dmax.
+// Each pixel gets independent noise via hash. No cells, no mosaics.
+// crystalSize controls amplitude via binomial crystal count N = 1/(cs²+0.01).
+// Coordinates normalized by image shorter edge for resolution independence.
 
-// Quality hash — two rounds to avoid visible grid artifacts
-float hash2(vec2 p) {
-  float h = dot(p, vec2(127.1, 311.7));
-  return fract(sin(h) * 43758.5453);
-}
-
-// Jittered cell hash: offsets the sample point within the cell
-// to break grid alignment, simulating random crystal scatter
-float jitteredHash(vec2 pos, float scale, float seed) {
-  vec2 cell = floor(pos / scale);
-  vec2 cellId = cell + vec2(seed);
-  // Jitter: shift sample point based on cell hash
-  float jx = hash2(cellId * 1.73 + vec2(37.8, 92.1));
-  float jy = hash2(cellId * 2.31 + vec2(64.3, 18.7));
-  vec2 jittered = cell + vec2(jx, jy);
-  return hash2(jittered + vec2(seed)) * 2.0 - 1.0;
-}
-
-// Multi-octave grain: real emulsions have a crystal size distribution.
-// We sample at two scales — primary crystals and a finer population —
-// and blend them to break up regularity.
-float crystalNoise(vec2 pos, float cs, float seed) {
-  float scale1 = max(1.5, cs * 5.0);       // primary crystal clumps
-  float scale2 = max(1.0, cs * 2.5);       // finer inter-crystal variation
-  float n1 = jitteredHash(pos, scale1, seed);
-  float n2 = jitteredHash(pos, scale2, seed + 500.0);
-  return n1 * 0.7 + n2 * 0.3;             // blend: mostly coarse, some fine detail
+// Per-pixel hash: maps (x, y, seed) to [-1, 1]
+// Uses two rounds of sin-hash to break correlation
+float grainHash(vec2 p, float seed) {
+  float h1 = dot(p + vec2(seed), vec2(127.1, 311.7));
+  float n1 = fract(sin(h1) * 43758.5453);
+  float h2 = dot(vec2(n1, seed), vec2(269.5, 183.3));
+  return fract(sin(h2) * 28001.8384) * 2.0 - 1.0;
 }
 
 // Per-layer grain: returns density perturbation
+// pos: pixel coordinate normalized by shorter image edge
 float layerGrain(vec2 pos, float cs, float density, float dm, float seed) {
-  float noise = crystalNoise(pos, cs, seed);
+  float noise = grainHash(pos, seed);
 
-  // Binomial model: crystal count per cell inversely proportional to area
-  float N = 1.0 / (cs * cs + 0.01);       // crystals per sample cell
+  // Binomial model: crystal count inversely proportional to crystal area
+  float N = 1.0 / (cs * cs + 0.01);
   float p = clamp(density / max(dm, 0.01), 0.0, 1.0);
 
-  // Binomial standard deviation: sqrt(p(1-p)/N)
+  // Binomial standard deviation
   float sigma = sqrt(p * (1.0 - p) / max(N, 0.1));
 
-  // Scale: dmax * sigma gives density-space perturbation
   return noise * sigma * dm * 1.2;
+}
+
+// Dye cloud grain: averages per-pixel noise over a small neighborhood
+// to simulate the spatial blur of dye formation around crystal sites.
+// Dye clouds are ~10-25x larger than crystals in real film.
+float dyeCloudGrain(vec2 pos, float cs, float density, float dm, float seed, vec2 pixelSize) {
+  float radius = clamp(cs * 3.0, 1.0, 3.0);
+  int r = int(radius);
+  float sum = 0.0;
+  float count = 0.0;
+  for (int dy = -3; dy <= 3; dy++) {
+    for (int dx = -3; dx <= 3; dx++) {
+      if (dx > r || dx < -r || dy > r || dy < -r) continue;
+      vec2 offset = vec2(float(dx), float(dy)) * pixelSize;
+      float w = 1.0 - length(vec2(float(dx), float(dy))) / (radius + 0.5);
+      if (w <= 0.0) continue;
+      sum += grainHash(pos + offset, seed) * w;
+      count += w;
+    }
+  }
+  float noise = sum / max(count, 1.0);
+
+  float N = 1.0 / (cs * cs + 0.01);
+  float p = clamp(density / max(dm, 0.01), 0.0, 1.0);
+  float sigma = sqrt(p * (1.0 - p) / max(N, 0.1));
+
+  // Color grain is lower contrast than silver grain (~60%)
+  return noise * sigma * dm * 0.7;
 }
 
 void main() {
@@ -164,10 +165,12 @@ void main() {
                   sens(CH.y, uSensPeak[0], uSensBw[0]),
                   sens(CH.z, uSensPeak[0], uSensBw[0]));
     float exposure = dot(lin, w) / max(dot(w, vec3(1.0)), 0.001);
-    float den = hd(exposure, uToe[0], uGamma[0], uShoulder[0], 2.5);
+    float den = uFog[0] + hd(exposure, uToe[0], uGamma[0], uShoulder[0], 2.5);
+    den = clamp(den, 0.0, 2.5);
 
     // Crystal grain on density
-    den = clamp(den + layerGrain(gl_FragCoord.xy, uCrystal[0], den, 2.5, seeds[0]), 0.0, 2.5);
+    vec2 grainCoord = gl_FragCoord.xy / min(uImgDim.x, uImgDim.y);
+    den = clamp(den + layerGrain(grainCoord, uCrystal[0], den, 2.5, seeds[0]), 0.0, 2.5);
 
     float lum = uRaw > 0.5 ? 1.0 - den / 2.5 : den / 2.5;
     lum = clamp(lum, 0.0, 1.0);
@@ -175,6 +178,7 @@ void main() {
   } else {
     float dn[${MAX_LAYERS}];
     vec3 avail = lin;
+    vec2 grainCoord = gl_FragCoord.xy / min(uImgDim.x, uImgDim.y);
 
     for (int i = 0; i < ${MAX_LAYERS}; i++) {
       if (i >= nLayers) break;
@@ -182,10 +186,17 @@ void main() {
                     sens(CH.y, uSensPeak[i], uSensBw[i]),
                     sens(CH.z, uSensPeak[i], uSensBw[i]));
       float e = dot(avail, w) / max(dot(w, vec3(1.0)), 0.001);
-      float d = hd(e, uToe[i], uGamma[i], uShoulder[i], uDmax[i]);
+      float d = uFog[i] + hd(e, uToe[i], uGamma[i], uShoulder[i], uDmax[i]);
 
       // Per-layer crystal grain: each layer's crystals scatter independently
-      d = clamp(d + layerGrain(gl_FragCoord.xy, uCrystal[i], d, uDmax[i], seeds[i]), 0.0, uDmax[i]);
+      float grainDelta;
+      if (uDyePurity[i] < 0.01) {
+        grainDelta = layerGrain(grainCoord, uCrystal[i], d, uDmax[i], seeds[i]);
+      } else {
+        float pxNorm = 1.0 / min(uImgDim.x, uImgDim.y);
+        grainDelta = dyeCloudGrain(grainCoord, uCrystal[i], d, uDmax[i], seeds[i], vec2(pxNorm));
+      }
+      d = clamp(d + grainDelta, 0.0, uDmax[i]);
       dn[i] = d;
 
       // Stacking uses grainy density (physical: light passes through developed crystals)
@@ -283,11 +294,11 @@ export class FilmRenderer {
 
     this.texture = gl.createTexture();
     this.u = {};
-    for (const n of ['uImg','uReversal','uRaw','uDir','uMaskDen','uMaskHue','uBaseTint','uPassthrough','uStackStr','uLayerCount']) {
+    for (const n of ['uImg','uReversal','uRaw','uDir','uMaskDen','uMaskHue','uBaseTint','uPassthrough','uStackStr','uLayerCount','uImgDim']) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
     this.uArrays = {};
-    for (const name of ['uSensPeak','uSensBw','uToe','uGamma','uShoulder','uDmax','uDyeHue','uDyePurity','uCrystal']) {
+    for (const name of ['uSensPeak','uSensBw','uToe','uGamma','uShoulder','uDmax','uFog','uDyeHue','uDyePurity','uCrystal']) {
       this.uArrays[name] = [];
       for (let i = 0; i < MAX_LAYERS; i++) {
         this.uArrays[name].push(gl.getUniformLocation(prog, `${name}[${i}]`));
@@ -362,6 +373,7 @@ export class FilmRenderer {
     gl.uniform1f(this.u.uReversal, recipe.global.reversal || 0);
     gl.uniform1f(this.u.uRaw, rawMode ? 1 : 0);
     gl.uniform1i(this.u.uLayerCount, n);
+    gl.uniform2f(this.u.uImgDim, this.imageWidth, this.imageHeight);
 
     for (let i = 0; i < MAX_LAYERS; i++) {
       const layer = i < n ? L[i] : {};
@@ -371,6 +383,7 @@ export class FilmRenderer {
       gl.uniform1f(this.uArrays.uGamma[i], layer.hdGamma ?? 0.7);
       gl.uniform1f(this.uArrays.uShoulder[i], layer.hdShoulder ?? 0.15);
       gl.uniform1f(this.uArrays.uDmax[i], layer.dmax ?? 2.0);
+      gl.uniform1f(this.uArrays.uFog[i], layer.fog ?? 0);
       gl.uniform1f(this.uArrays.uDyeHue[i], layer.dyeHue ?? 0);
       gl.uniform1f(this.uArrays.uDyePurity[i], layer.dyePurity ?? 0);
       gl.uniform1f(this.uArrays.uCrystal[i], layer.crystalSize ?? 0.3);
@@ -428,35 +441,40 @@ export class FilmRenderer {
     // Grain model matching GLSL
     const SEEDS = [0.0, 73.156, 191.329, 347.718, 521.437];
 
-    function hash2(ax, ay) {
-      const h = ax * 127.1 + ay * 311.7;
-      return ((Math.sin(h) * 43758.5453) % 1 + 1) % 1;
+    function grainHash(px, py, seed) {
+      const h1 = (px + seed) * 127.1 + py * 311.7;
+      const n1 = ((Math.sin(h1) * 43758.5453) % 1 + 1) % 1;
+      const h2 = n1 * 269.5 + seed * 183.3;
+      return ((Math.sin(h2) * 28001.8384) % 1 + 1) % 1 * 2 - 1;
     }
 
-    function jitteredHash(px, py, scale, seed) {
-      const cx = Math.floor(px / scale);
-      const cy = Math.floor(py / scale);
-      const idx = cx + seed;
-      const idy = cy;
-      const jx = hash2(idx * 1.73 + 37.8, idy * 1.73 + 92.1);
-      const jy = hash2(idx * 2.31 + 64.3, idy * 2.31 + 18.7);
-      return hash2(cx + jx + seed, cy + jy) * 2 - 1;
-    }
-
-    function crystalNoise(px, py, cs, seed) {
-      const s1 = Math.max(1.5, cs * 5);
-      const s2 = Math.max(1.0, cs * 2.5);
-      const n1 = jitteredHash(px, py, s1, seed);
-      const n2 = jitteredHash(px, py, s2, seed + 500);
-      return n1 * 0.7 + n2 * 0.3;
-    }
-
-    function cpuLayerGrain(px, py, cs, density, dm, seed) {
-      const noise = crystalNoise(px, py, cs, seed);
+    function cpuLayerGrain(px, py, cs, density, dm, seed, imgDim) {
+      const shortEdge = Math.min(imgDim[0], imgDim[1]);
+      const noise = grainHash(px / shortEdge, py / shortEdge, seed);
       const N = 1 / (cs * cs + 0.01);
       const p = Math.max(0, Math.min(1, density / Math.max(dm, 0.01)));
       const sigma = Math.sqrt(p * (1 - p) / Math.max(N, 0.1));
       return noise * sigma * dm * 1.2;
+    }
+
+    function cpuDyeCloudGrain(px, py, cs, density, dm, seed, imgDim) {
+      const shortEdge = Math.min(imgDim[0], imgDim[1]);
+      const radius = Math.max(1, Math.min(3, Math.trunc(cs * 3)));
+      let sum = 0, count = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const w = 1 - dist / (radius + 0.5);
+          if (w <= 0) continue;
+          sum += grainHash((px + dx) / shortEdge, (py + dy) / shortEdge, seed) * w;
+          count += w;
+        }
+      }
+      const noise = sum / Math.max(count, 1);
+      const N = 1 / (cs * cs + 0.01);
+      const p = Math.max(0, Math.min(1, density / Math.max(dm, 0.01)));
+      const sigma = Math.sqrt(p * (1 - p) / Math.max(N, 0.1));
+      return noise * sigma * dm * 0.7;
     }
 
     const LN10 = 2.302585;
@@ -476,8 +494,9 @@ export class FilmRenderer {
         const wB = sens(CH[2], L.sensitizerPeak, L.sensitizerBw);
         const wS = wR + wG + wB || 1;
         const exp = (sr * wR + sg * wG + sb * wB) / wS;
-        let den = hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, 2.5);
-        den = Math.max(0, Math.min(2.5, den + cpuLayerGrain(px, py, L.crystalSize, den, 2.5, SEEDS[0])));
+        let den = (L.fog || 0) + hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, 2.5);
+        den = Math.max(0, Math.min(2.5, den));
+        den = Math.max(0, Math.min(2.5, den + cpuLayerGrain(px, py, L.crystalSize, den, 2.5, SEEDS[0], [width, height])));
         let lum = rawMode ? 1 - den / 2.5 : den / 2.5;
         lum = Math.max(0, Math.min(1, lum));
         oR = lum * g.baseTintR;
@@ -494,8 +513,13 @@ export class FilmRenderer {
           const wB = sens(CH[2], L.sensitizerPeak, L.sensitizerBw);
           const wS = wR + wG + wB || 1;
           const exp = (availR * wR + availG * wG + availB * wB) / wS;
-          let d = hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, L.dmax);
-          d = Math.max(0, Math.min(L.dmax, d + cpuLayerGrain(px, py, L.crystalSize, d, L.dmax, SEEDS[j] || 0)));
+          let d = (L.fog || 0) + hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, L.dmax);
+          d = Math.max(0, Math.min(L.dmax, d));
+          if (L.dyePurity < 0.01) {
+            d = Math.max(0, Math.min(L.dmax, d + cpuLayerGrain(px, py, L.crystalSize, d, L.dmax, SEEDS[j] || 0, [width, height])));
+          } else {
+            d = Math.max(0, Math.min(L.dmax, d + cpuDyeCloudGrain(px, py, L.crystalSize, d, L.dmax, SEEDS[j] || 0, [width, height])));
+          }
           if (stackStr > 0) {
             const [aR, aG, aB] = dyeA(L.dyeHue, L.dyePurity);
             const mix = (base, att) => base * (1 - stackStr) + att * stackStr;

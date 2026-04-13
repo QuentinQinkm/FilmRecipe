@@ -22,15 +22,6 @@ export function initTopbar(cbs) {
     if (callbacks.onTemplateChange) callbacks.onTemplateChange();
   });
 
-  // Pro/Simple toggle
-  document.querySelectorAll('#mode-toggle .toggle-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.proMode = btn.dataset.mode === 'pro';
-      document.querySelectorAll('#mode-toggle .toggle-btn').forEach(b =>
-        b.classList.toggle('active', b === btn));
-      callbacks.onModeChange();
-    });
-  });
 }
 
 export function updateSaveButtons() {

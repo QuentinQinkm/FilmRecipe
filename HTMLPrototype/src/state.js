@@ -1,61 +1,48 @@
 const STORAGE_KEY = 'filmlab-custom-recipes';
 
-function lerp(a, b, t) { return a + (b - a) * t; }
-
-export function tonePreset(t) {
-  return {
-    hdToe:      lerp(0.35, 0.08, t),
-    hdGamma:    lerp(0.50, 2.20, t),
-    hdShoulder: lerp(0.30, 0.05, t),
-  };
-}
-
-export function toneFromHD(gamma) {
-  return Math.max(0, Math.min(1, (gamma - 0.50) / (2.20 - 0.50)));
-}
 
 export const STOCK_TEMPLATES = {
   'Portra 400': {
     layers: [
-      { name: 'cyan', sensitizerPeak: 620, sensitizerBw: 80, dyeHue: 185, dyePurity: 0.70, dmax: 2.1, hdToe: 0.22, hdGamma: 0.68, hdShoulder: 0.18, crystalSize: 0.35 },
-      { name: 'magenta', sensitizerPeak: 540, sensitizerBw: 90, dyeHue: 320, dyePurity: 0.75, dmax: 2.0, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
-      { name: 'yellow', sensitizerPeak: 440, sensitizerBw: 70, dyeHue: 55, dyePurity: 0.80, dmax: 2.2, hdToe: 0.18, hdGamma: 0.72, hdShoulder: 0.12, crystalSize: 0.28 },
+      { name: 'cyan', sensitizerPeak: 620, sensitizerBw: 80, dyeHue: 185, dyePurity: 0.70, dmax: 2.1, fog: 0.05, hdToe: 0.22, hdGamma: 0.68, hdShoulder: 0.18, crystalSize: 0.35 },
+      { name: 'magenta', sensitizerPeak: 540, sensitizerBw: 90, dyeHue: 320, dyePurity: 0.75, dmax: 2.0, fog: 0.04, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
+      { name: 'yellow', sensitizerPeak: 440, sensitizerBw: 70, dyeHue: 55, dyePurity: 0.80, dmax: 2.2, fog: 0.04, hdToe: 0.18, hdGamma: 0.72, hdShoulder: 0.12, crystalSize: 0.28 },
     ],
     global: { reversal: 0, stackingStrength: 0, maskDensity: 0.42, maskHue: 28, dirInhibition: 0.35, baseTintR: 1.0, baseTintG: 0.97, baseTintB: 0.94 },
   },
   'Gold 200': {
     layers: [
-      { name: 'cyan', sensitizerPeak: 615, sensitizerBw: 95, dyeHue: 190, dyePurity: 0.65, dmax: 2.3, hdToe: 0.15, hdGamma: 0.80, hdShoulder: 0.15, crystalSize: 0.25 },
-      { name: 'magenta', sensitizerPeak: 545, sensitizerBw: 100, dyeHue: 330, dyePurity: 0.72, dmax: 2.1, hdToe: 0.14, hdGamma: 0.82, hdShoulder: 0.14, crystalSize: 0.22 },
-      { name: 'yellow', sensitizerPeak: 445, sensitizerBw: 75, dyeHue: 48, dyePurity: 0.85, dmax: 2.4, hdToe: 0.12, hdGamma: 0.85, hdShoulder: 0.12, crystalSize: 0.20 },
+      { name: 'cyan', sensitizerPeak: 615, sensitizerBw: 95, dyeHue: 190, dyePurity: 0.65, dmax: 2.3, fog: 0.06, hdToe: 0.15, hdGamma: 0.80, hdShoulder: 0.15, crystalSize: 0.25 },
+      { name: 'magenta', sensitizerPeak: 545, sensitizerBw: 100, dyeHue: 330, dyePurity: 0.72, dmax: 2.1, fog: 0.05, hdToe: 0.14, hdGamma: 0.82, hdShoulder: 0.14, crystalSize: 0.22 },
+      { name: 'yellow', sensitizerPeak: 445, sensitizerBw: 75, dyeHue: 48, dyePurity: 0.85, dmax: 2.4, fog: 0.05, hdToe: 0.12, hdGamma: 0.85, hdShoulder: 0.12, crystalSize: 0.20 },
     ],
     global: { reversal: 0, stackingStrength: 0, maskDensity: 0.50, maskHue: 32, dirInhibition: 0.25, baseTintR: 1.0, baseTintG: 0.95, baseTintB: 0.88 },
   },
   'Velvia 50': {
     layers: [
-      { name: 'cyan', sensitizerPeak: 630, sensitizerBw: 65, dyeHue: 195, dyePurity: 0.92, dmax: 2.8, hdToe: 0.35, hdGamma: 1.60, hdShoulder: 0.20, crystalSize: 0.15 },
-      { name: 'magenta', sensitizerPeak: 535, sensitizerBw: 70, dyeHue: 310, dyePurity: 0.90, dmax: 2.7, hdToe: 0.38, hdGamma: 1.65, hdShoulder: 0.18, crystalSize: 0.14 },
-      { name: 'yellow', sensitizerPeak: 430, sensitizerBw: 65, dyeHue: 58, dyePurity: 0.88, dmax: 2.6, hdToe: 0.32, hdGamma: 1.55, hdShoulder: 0.22, crystalSize: 0.13 },
+      { name: 'cyan', sensitizerPeak: 630, sensitizerBw: 65, dyeHue: 195, dyePurity: 0.92, dmax: 2.8, fog: 0.02, hdToe: 0.35, hdGamma: 1.60, hdShoulder: 0.20, crystalSize: 0.15 },
+      { name: 'magenta', sensitizerPeak: 535, sensitizerBw: 70, dyeHue: 310, dyePurity: 0.90, dmax: 2.7, fog: 0.02, hdToe: 0.38, hdGamma: 1.65, hdShoulder: 0.18, crystalSize: 0.14 },
+      { name: 'yellow', sensitizerPeak: 430, sensitizerBw: 65, dyeHue: 58, dyePurity: 0.88, dmax: 2.6, fog: 0.02, hdToe: 0.32, hdGamma: 1.55, hdShoulder: 0.22, crystalSize: 0.13 },
     ],
     global: { reversal: 1, stackingStrength: 0, maskDensity: 0, maskHue: 0, dirInhibition: 0.60, baseTintR: 0.99, baseTintG: 0.99, baseTintB: 1.0 },
   },
   'Kodachrome 64': {
     layers: [
-      { name: 'cyan', sensitizerPeak: 625, sensitizerBw: 70, dyeHue: 200, dyePurity: 0.88, dmax: 2.5, hdToe: 0.28, hdGamma: 1.30, hdShoulder: 0.18, crystalSize: 0.18 },
-      { name: 'magenta', sensitizerPeak: 545, sensitizerBw: 75, dyeHue: 350, dyePurity: 0.85, dmax: 2.4, hdToe: 0.25, hdGamma: 1.35, hdShoulder: 0.15, crystalSize: 0.17 },
-      { name: 'yellow', sensitizerPeak: 440, sensitizerBw: 68, dyeHue: 50, dyePurity: 0.90, dmax: 2.6, hdToe: 0.22, hdGamma: 1.40, hdShoulder: 0.14, crystalSize: 0.16 },
+      { name: 'cyan', sensitizerPeak: 625, sensitizerBw: 70, dyeHue: 200, dyePurity: 0.88, dmax: 2.5, fog: 0.03, hdToe: 0.28, hdGamma: 1.30, hdShoulder: 0.18, crystalSize: 0.18 },
+      { name: 'magenta', sensitizerPeak: 545, sensitizerBw: 75, dyeHue: 350, dyePurity: 0.85, dmax: 2.4, fog: 0.03, hdToe: 0.25, hdGamma: 1.35, hdShoulder: 0.15, crystalSize: 0.17 },
+      { name: 'yellow', sensitizerPeak: 440, sensitizerBw: 68, dyeHue: 50, dyePurity: 0.90, dmax: 2.6, fog: 0.03, hdToe: 0.22, hdGamma: 1.40, hdShoulder: 0.14, crystalSize: 0.16 },
     ],
     global: { reversal: 1, stackingStrength: 0, maskDensity: 0, maskHue: 0, dirInhibition: 0.50, baseTintR: 1.0, baseTintG: 0.98, baseTintB: 0.96 },
   },
   'Ilford HP5': {
     layers: [
-      { name: 'panchromatic', sensitizerPeak: 550, sensitizerBw: 150, dyeHue: 0, dyePurity: 0, dmax: 1.20, hdToe: 0.20, hdGamma: 0.78, hdShoulder: 0.15, crystalSize: 0.55 },
+      { name: 'panchromatic', sensitizerPeak: 550, sensitizerBw: 150, dyeHue: 0, dyePurity: 0, dmax: 1.20, fog: 0.08, hdToe: 0.20, hdGamma: 0.78, hdShoulder: 0.15, crystalSize: 0.55 },
     ],
     global: { reversal: 0, stackingStrength: 0, maskDensity: 0, maskHue: 0, dirInhibition: 0, baseTintR: 1.0, baseTintG: 1.0, baseTintB: 1.0 },
   },
   'Kodak Tri-X': {
     layers: [
-      { name: 'panchromatic', sensitizerPeak: 560, sensitizerBw: 140, dyeHue: 0, dyePurity: 0, dmax: 1.55, hdToe: 0.30, hdGamma: 1.05, hdShoulder: 0.18, crystalSize: 0.90 },
+      { name: 'panchromatic', sensitizerPeak: 560, sensitizerBw: 140, dyeHue: 0, dyePurity: 0, dmax: 1.55, fog: 0.10, hdToe: 0.30, hdGamma: 1.05, hdShoulder: 0.18, crystalSize: 0.90 },
     ],
     global: { reversal: 0, stackingStrength: 0, maskDensity: 0, maskHue: 0, dirInhibition: 0, baseTintR: 0.99, baseTintG: 0.99, baseTintB: 0.98 },
   },
@@ -63,9 +50,9 @@ export const STOCK_TEMPLATES = {
 
 export const BLANK_RECIPE = {
   layers: [
-    { name: 'cyan', sensitizerPeak: 620, sensitizerBw: 85, dyeHue: 185, dyePurity: 0.70, dmax: 2.0, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
-    { name: 'magenta', sensitizerPeak: 540, sensitizerBw: 85, dyeHue: 320, dyePurity: 0.70, dmax: 2.0, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
-    { name: 'yellow', sensitizerPeak: 440, sensitizerBw: 85, dyeHue: 55, dyePurity: 0.70, dmax: 2.0, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
+    { name: 'cyan', sensitizerPeak: 620, sensitizerBw: 85, dyeHue: 185, dyePurity: 0.70, dmax: 2.0, fog: 0.05, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
+    { name: 'magenta', sensitizerPeak: 540, sensitizerBw: 85, dyeHue: 320, dyePurity: 0.70, dmax: 2.0, fog: 0.05, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
+    { name: 'yellow', sensitizerPeak: 440, sensitizerBw: 85, dyeHue: 55, dyePurity: 0.70, dmax: 2.0, fog: 0.05, hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30 },
   ],
   global: { reversal: 0, stackingStrength: 0, maskDensity: 0.35, maskHue: 28, dirInhibition: 0.30, baseTintR: 1.0, baseTintG: 0.97, baseTintB: 0.94 },
 };
@@ -75,16 +62,13 @@ export const LAYER_CONTROLS = [
   ['sensitizerBw', 'Sensitivity range', 'Sensitizer bandwidth', 'nm', 30, 200, 1, 0],
   ['dyePurity', 'Color richness', 'Dye purity', '', 0, 1, 0.01, 2],
   ['dmax', 'Max density', 'Dmax', '', 0.05, 3.5, 0.01, 2],
+  ['fog', 'Base fog', 'Base + fog (Dmin)', '', 0, 0.3, 0.01, 2],
   ['hdToe', 'Shadow detail', 'H&D toe', '', 0, 0.5, 0.01, 2],
   ['hdGamma', 'Contrast', 'H&D gamma', '', 0.3, 3, 0.01, 2],
   ['hdShoulder', 'Highlight rolloff', 'H&D shoulder', '', 0, 0.5, 0.01, 2],
   ['crystalSize', 'Grain size', 'Crystal size', '', 0.05, 2, 0.01, 2],
 ];
 
-export const SIMPLE_LAYER_CONTROLS = [
-  ['tone', 'Tone', 'Tone preset', '', 0, 1, 0.01, 2],
-  ['crystalSize', 'Grain', 'Crystal size', '', 0.05, 2, 0.01, 2],
-];
 
 export const PRO_LAYER_CONTROLS = [
   ['hdToe', 'Shadow detail', 'H&D toe', '', 0, 0.5, 0.01, 2],
@@ -126,7 +110,7 @@ export function makeDefaultLayer(index) {
   const i = Math.min(index, names.length - 1);
   return {
     name: names[i], sensitizerPeak: peaks[i], sensitizerBw: 85,
-    dyeHue: complementHue(peaks[i]), dyePurity: 0.70, dmax: 2.0,
+    dyeHue: complementHue(peaks[i]), dyePurity: 0.70, dmax: 2.0, fog: 0.05,
     hdToe: 0.20, hdGamma: 0.70, hdShoulder: 0.15, crystalSize: 0.30,
   };
 }
@@ -199,12 +183,6 @@ export function applyDevelopment(recipe, lab) {
   const processBias = lab.developerActivity * 0.42 + tempDelta * 0.03 + timeDelta * 0.15;
 
   out.layers.forEach(layer => {
-    if (layer.tone !== undefined) {
-      const tp = tonePreset(layer.tone);
-      layer.hdToe = tp.hdToe;
-      layer.hdGamma = tp.hdGamma;
-      layer.hdShoulder = tp.hdShoulder;
-    }
     const isSilver = layer.dyePurity === 0;
     layer.hdGamma = clamp(
       layer.hdGamma * (1 + processBias * 0.23 - freshPenalty * 0.15), 0.5, 3.0);
@@ -244,7 +222,6 @@ export const state = {
   recipeName: '',
   isDirty: false,
   savedRecipes: loadSavedRecipes(),
-  proMode: false,
   rawMode: false,
   referenceActive: false,
   selectedLayerIdx: 0,
