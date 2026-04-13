@@ -6,15 +6,24 @@ void main() {
   gl_Position = vec4(aPos, 0.0, 1.0);
 }`;
 
+const MAX_LAYERS = 5;
+
 const FRAG_SRC = `
 precision highp float;
 varying vec2 vUV;
 uniform sampler2D uImg;
-uniform float uReversal; // 0=negative process, 1=reversal (E-6)
+uniform float uReversal;
 uniform float uRaw;
-uniform vec3 uSensPeak, uSensBw;
-uniform vec3 uToe, uGamma, uShoulder, uDmax;
-uniform vec3 uDyeHue, uDyePurity, uCrystal;
+uniform int uLayerCount;
+uniform float uSensPeak[${MAX_LAYERS}];
+uniform float uSensBw[${MAX_LAYERS}];
+uniform float uToe[${MAX_LAYERS}];
+uniform float uGamma[${MAX_LAYERS}];
+uniform float uShoulder[${MAX_LAYERS}];
+uniform float uDmax[${MAX_LAYERS}];
+uniform float uDyeHue[${MAX_LAYERS}];
+uniform float uDyePurity[${MAX_LAYERS}];
+uniform float uCrystal[${MAX_LAYERS}];
 uniform float uDir, uMaskDen, uMaskHue;
 uniform vec3 uBaseTint;
 uniform float uPassthrough;
@@ -83,82 +92,98 @@ void main() {
   vec4 tx = texture2D(uImg, vUV);
   if (uPassthrough > 0.5) { gl_FragColor = tx; return; }
   vec3 lin = vec3(s2l(tx.r), s2l(tx.g), s2l(tx.b));
-  bool isBW  = uDyePurity.x < 0.01 && uDyePurity.y < 0.01 && uDyePurity.z < 0.01;
+
+  int nLayers = uLayerCount;
+  bool isBW = true;
+  for (int i = 0; i < ${MAX_LAYERS}; i++) {
+    if (i >= nLayers) break;
+    if (uDyePurity[i] >= 0.01) { isBW = false; break; }
+  }
   bool isPos = !isBW && uReversal > 0.5;
   bool isNeg = !isBW && uReversal < 0.5;
   vec3 out3;
 
   if (isBW) {
-    vec3 w = vec3(sens(CH.x, uSensPeak.x, uSensBw.x),
-                  sens(CH.y, uSensPeak.x, uSensBw.x),
-                  sens(CH.z, uSensPeak.x, uSensBw.x));
+    vec3 w = vec3(sens(CH.x, uSensPeak[0], uSensBw[0]),
+                  sens(CH.y, uSensPeak[0], uSensBw[0]),
+                  sens(CH.z, uSensPeak[0], uSensBw[0]));
     float exposure = dot(lin, w) / max(dot(w, vec3(1.0)), 0.001);
-    float den = hd(exposure, uToe.x, uGamma.x, uShoulder.x, 2.5);
+    float den = hd(exposure, uToe[0], uGamma[0], uShoulder[0], 2.5);
     float lum = uRaw > 0.5 ? 1.0 - den / 2.5 : den / 2.5;
     lum = clamp(lum, 0.0, 1.0);
-    float g = grn(gl_FragCoord.xy, max(1.0, uCrystal.x * 4.0));
-    lum = clamp(lum + g * grnAmt(lum, uCrystal.x), 0.0, 1.0);
+    float g = grn(gl_FragCoord.xy, max(1.0, uCrystal[0] * 4.0));
+    lum = clamp(lum + g * grnAmt(lum, uCrystal[0]), 0.0, 1.0);
     out3 = vec3(lum) * uBaseTint;
   } else {
-    vec3 w0 = vec3(sens(CH.x, uSensPeak.x, uSensBw.x), sens(CH.y, uSensPeak.x, uSensBw.x), sens(CH.z, uSensPeak.x, uSensBw.x));
-    vec3 w1 = vec3(sens(CH.x, uSensPeak.y, uSensBw.y), sens(CH.y, uSensPeak.y, uSensBw.y), sens(CH.z, uSensPeak.y, uSensBw.y));
-    vec3 w2 = vec3(sens(CH.x, uSensPeak.z, uSensBw.z), sens(CH.y, uSensPeak.z, uSensBw.z), sens(CH.z, uSensPeak.z, uSensBw.z));
+    // Per-layer exposure, density, stacking
+    float dn[${MAX_LAYERS}];
+    vec3 avail = lin;
 
-    // Layer 0 (topmost): sees original light
-    float e0 = dot(lin, w0) / max(dot(w0, vec3(1.0)), 0.001);
-    float dn0 = hd(e0, uToe.x, uGamma.x, uShoulder.x, uDmax.x);
+    for (int i = 0; i < ${MAX_LAYERS}; i++) {
+      if (i >= nLayers) break;
+      vec3 w = vec3(sens(CH.x, uSensPeak[i], uSensBw[i]),
+                    sens(CH.y, uSensPeak[i], uSensBw[i]),
+                    sens(CH.z, uSensPeak[i], uSensBw[i]));
+      float e = dot(avail, w) / max(dot(w, vec3(1.0)), 0.001);
+      float d = hd(e, uToe[i], uGamma[i], uShoulder[i], uDmax[i]);
+      dn[i] = d;
 
-    // Stacking attenuation: upper layers filter light for lower ones
-    vec3 sa0 = dyeAbs(uDyeHue.x, uDyePurity.x) * dn0;
-    vec3 avail1 = lin * mix(vec3(1.0), exp(-sa0 * LN10), uStackStr);
-
-    float e1 = dot(avail1, w1) / max(dot(w1, vec3(1.0)), 0.001);
-    float dn1 = hd(e1, uToe.y, uGamma.y, uShoulder.y, uDmax.y);
-
-    vec3 sa1 = dyeAbs(uDyeHue.y, uDyePurity.y) * dn1;
-    vec3 avail2 = avail1 * mix(vec3(1.0), exp(-sa1 * LN10), uStackStr);
-
-    float e2 = dot(avail2, w2) / max(dot(w2, vec3(1.0)), 0.001);
-    float dn2 = hd(e2, uToe.z, uGamma.z, uShoulder.z, uDmax.z);
-
-    if (isPos) {
-      dn0 = uDmax.x - dn0;
-      dn1 = uDmax.y - dn1;
-      dn2 = uDmax.z - dn2;
+      // Stacking attenuation for next layer
+      if (uStackStr > 0.0) {
+        vec3 sa = dyeAbs(uDyeHue[i], uDyePurity[i]) * d;
+        avail *= mix(vec3(1.0), exp(-sa * LN10), uStackStr);
+      }
     }
 
-    float d0 = max(0.0, dn0 - uDir * (dn1 + dn2) * 0.15);
-    float d1 = max(0.0, dn1 - uDir * (dn0 + dn2) * 0.15);
-    float d2 = max(0.0, dn2 - uDir * (dn0 + dn1) * 0.15);
+    // Apply reversal
+    if (isPos) {
+      for (int i = 0; i < ${MAX_LAYERS}; i++) {
+        if (i >= nLayers) break;
+        dn[i] = uDmax[i] - dn[i];
+      }
+    }
 
-    vec3 da0 = dyeAbs(uDyeHue.x, uDyePurity.x);
-    vec3 da1 = dyeAbs(uDyeHue.y, uDyePurity.y);
-    vec3 da2 = dyeAbs(uDyeHue.z, uDyePurity.z);
-    vec3 totalOD = da0 * d0 + da1 * d1 + da2 * d2;
-    vec3 trans = exp(-totalOD * LN10);
+    // DIR inhibition
+    float totalDenSum = 0.0;
+    for (int i = 0; i < ${MAX_LAYERS}; i++) {
+      if (i >= nLayers) break;
+      totalDenSum += dn[i];
+    }
+    float d[${MAX_LAYERS}];
+    for (int i = 0; i < ${MAX_LAYERS}; i++) {
+      if (i >= nLayers) break;
+      float inh = totalDenSum - dn[i];
+      d[i] = max(0.0, dn[i] - uDir * inh * 0.15);
+    }
+
+    // Total optical density
+    vec3 totalOD = vec3(0.0);
+    float avgCrystal = 0.0;
+    for (int i = 0; i < ${MAX_LAYERS}; i++) {
+      if (i >= nLayers) break;
+      vec3 da = dyeAbs(uDyeHue[i], uDyePurity[i]);
+      totalOD += da * d[i];
+      avgCrystal += uCrystal[i];
+    }
+    avgCrystal /= float(nLayers);
 
     if (isNeg && uRaw < 0.5) {
-      // Negative scan: map dye density to print brightness
-      // Mask cancels out (film has mask+dye, scanner subtracts mask → dye only)
       float scanExp = 3.0;
       out3 = vec3(1.0) - exp(-totalOD * scanExp);
     } else if (isNeg) {
-      // Raw negative: physically include orange mask in transmittance
-      // maskHue (0-60) shifts mask color: 0=red-orange, 28=classic orange, 60=yellow-orange
       float mh = clamp(uMaskHue / 60.0, 0.0, 1.0);
       vec3 maskOD = vec3(uMaskDen * mix(0.65, 0.45, mh),
                          uMaskDen * mix(0.15, 0.40, mh),
                          uMaskDen * mix(0.05, 0.10, mh));
       out3 = exp(-(totalOD + maskOD) * LN10);
     } else {
-      out3 = trans;
+      out3 = exp(-totalOD * LN10);
     }
 
     out3 *= uBaseTint;
-    float avgC = (uCrystal.x + uCrystal.y + uCrystal.z) / 3.0;
     float lum = dot(out3, vec3(0.333));
-    float gv = grn(gl_FragCoord.xy, max(1.0, avgC * 4.0));
-    out3 = clamp(out3 + vec3(gv * grnAmt(lum, avgC)), 0.0, 1.0);
+    float gv = grn(gl_FragCoord.xy, max(1.0, avgCrystal * 4.0));
+    out3 = clamp(out3 + vec3(gv * grnAmt(lum, avgCrystal)), 0.0, 1.0);
   }
 
   gl_FragColor = vec4(l2s(out3.r), l2s(out3.g), l2s(out3.b), 1.0);
@@ -204,13 +229,18 @@ export class FilmRenderer {
 
     this.texture = gl.createTexture();
     this.u = {};
-    const names = [
-      'uImg','uReversal','uRaw',
-      'uSensPeak','uSensBw','uToe','uGamma','uShoulder','uDmax',
-      'uDyeHue','uDyePurity','uCrystal',
-      'uDir','uMaskDen','uMaskHue','uBaseTint','uPassthrough','uStackStr'
-    ];
-    for (const n of names) this.u[n] = gl.getUniformLocation(prog, n);
+    // Scalar/vec uniforms
+    for (const n of ['uImg','uReversal','uRaw','uDir','uMaskDen','uMaskHue','uBaseTint','uPassthrough','uStackStr','uLayerCount']) {
+      this.u[n] = gl.getUniformLocation(prog, n);
+    }
+    // Array uniforms — get location for each element
+    this.uArrays = {};
+    for (const name of ['uSensPeak','uSensBw','uToe','uGamma','uShoulder','uDmax','uDyeHue','uDyePurity','uCrystal']) {
+      this.uArrays[name] = [];
+      for (let i = 0; i < MAX_LAYERS; i++) {
+        this.uArrays[name].push(gl.getUniformLocation(prog, `${name}[${i}]`));
+      }
+    }
   }
 
   _compile(type, src) {
@@ -248,44 +278,16 @@ export class FilmRenderer {
 
   render(recipe, rawMode) {
     if (!this.hasImage) return;
-    const needCPU = !this.gl || recipe.layers.length > 3;
-    if (!needCPU) {
+    if (this.gl) {
       this._renderGL(recipe, rawMode);
     } else {
       const out = this._renderCPU(recipe, rawMode);
-      if (out && this.gl) {
-        this._blitViaGL(out);
-      } else if (out) {
+      if (out) {
         const { canvas } = this;
         canvas.width = out.width;
         canvas.height = out.height;
         canvas.getContext('2d').putImageData(out, 0, 0);
       }
-    }
-  }
-
-  _blitViaGL(imageData) {
-    const gl = this.gl;
-    const { canvas } = this;
-    canvas.width = imageData.width;
-    canvas.height = imageData.height;
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.useProgram(this.prog);
-
-    const tmp = document.createElement('canvas');
-    tmp.width = imageData.width;
-    tmp.height = imageData.height;
-    tmp.getContext('2d').putImageData(imageData, 0, 0);
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tmp);
-    gl.uniform1i(this.u.uImg, 0);
-    gl.uniform1f(this.u.uPassthrough, 1);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    if (this._sourceCanvas) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this._sourceCanvas);
     }
   }
 
@@ -302,20 +304,26 @@ export class FilmRenderer {
     gl.uniform1i(this.u.uImg, 0);
 
     const L = recipe.layers;
-    const v3 = (key, def) => [L[0]?.[key] ?? def, L[1]?.[key] ?? def, L[2]?.[key] ?? def];
+    const n = Math.min(L.length, MAX_LAYERS);
 
     gl.uniform1f(this.u.uPassthrough, 0);
     gl.uniform1f(this.u.uReversal, recipe.global.reversal || 0);
     gl.uniform1f(this.u.uRaw, rawMode ? 1 : 0);
-    gl.uniform3fv(this.u.uSensPeak, v3('sensitizerPeak', 550));
-    gl.uniform3fv(this.u.uSensBw, v3('sensitizerBw', 100));
-    gl.uniform3fv(this.u.uToe, v3('hdToe', 0.2));
-    gl.uniform3fv(this.u.uGamma, v3('hdGamma', 0.7));
-    gl.uniform3fv(this.u.uShoulder, v3('hdShoulder', 0.15));
-    gl.uniform3fv(this.u.uDmax, v3('dmax', 2.0));
-    gl.uniform3fv(this.u.uDyeHue, v3('dyeHue', 0));
-    gl.uniform3fv(this.u.uDyePurity, v3('dyePurity', 0));
-    gl.uniform3fv(this.u.uCrystal, v3('crystalSize', 0.3));
+    gl.uniform1i(this.u.uLayerCount, n);
+
+    // Set per-layer array uniforms
+    for (let i = 0; i < MAX_LAYERS; i++) {
+      const layer = i < n ? L[i] : {};
+      gl.uniform1f(this.uArrays.uSensPeak[i], layer.sensitizerPeak ?? 550);
+      gl.uniform1f(this.uArrays.uSensBw[i], layer.sensitizerBw ?? 100);
+      gl.uniform1f(this.uArrays.uToe[i], layer.hdToe ?? 0.2);
+      gl.uniform1f(this.uArrays.uGamma[i], layer.hdGamma ?? 0.7);
+      gl.uniform1f(this.uArrays.uShoulder[i], layer.hdShoulder ?? 0.15);
+      gl.uniform1f(this.uArrays.uDmax[i], layer.dmax ?? 2.0);
+      gl.uniform1f(this.uArrays.uDyeHue[i], layer.dyeHue ?? 0);
+      gl.uniform1f(this.uArrays.uDyePurity[i], layer.dyePurity ?? 0);
+      gl.uniform1f(this.uArrays.uCrystal[i], layer.crystalSize ?? 0.3);
+    }
 
     const g = recipe.global;
     gl.uniform1f(this.u.uDir, g.dirInhibition);
@@ -399,7 +407,6 @@ export class FilmRenderer {
           const wS = wR + wG + wB || 1;
           const exp = (availR * wR + availG * wG + availB * wB) / wS;
           const d = hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, L.dmax);
-          // Stacking uses pre-reversal density (matches GPU path)
           if (stackStr > 0) {
             const [aR, aG, aB] = dyeA(L.dyeHue, L.dyePurity);
             const mix = (base, att) => base * (1 - stackStr) + att * stackStr;
@@ -407,23 +414,16 @@ export class FilmRenderer {
             availG = mix(availG, availG * Math.exp(-aG * d * LN10));
             availB = mix(availB, availB * Math.exp(-aB * d * LN10));
           }
-          // Apply reversal after stacking attenuation
           dens.push(isPos ? L.dmax - d : d);
         }
         const dir = g.dirInhibition;
-        const d = dens.map((v, j) => {
-          let inh = 0;
-          for (let k = 0; k < dens.length; k++) if (k !== j) inh += dens[k];
-          return Math.max(0, v - dir * inh * 0.15);
-        });
+        const totalDenSum = dens.reduce((a, b) => a + b, 0);
+        const d = dens.map(v => Math.max(0, v - dir * (totalDenSum - v) * 0.15));
         let totR = 0, totG = 0, totB = 0;
         for (let j = 0; j < layers.length; j++) {
           const [aR, aG, aB] = dyeA(layers[j].dyeHue, layers[j].dyePurity);
           totR += aR * d[j]; totG += aG * d[j]; totB += aB * d[j];
         }
-        const tR = Math.exp(-totR * LN10);
-        const tG = Math.exp(-totG * LN10);
-        const tB = Math.exp(-totB * LN10);
 
         if (isNeg && !rawMode) {
           const scanExp = 3.0;
@@ -439,7 +439,9 @@ export class FilmRenderer {
           oG = Math.exp(-(totG + mG) * LN10);
           oB = Math.exp(-(totB + mB) * LN10);
         } else {
-          oR = tR; oG = tG; oB = tB;
+          oR = Math.exp(-totR * LN10);
+          oG = Math.exp(-totG * LN10);
+          oB = Math.exp(-totB * LN10);
         }
         oR *= g.baseTintR; oG *= g.baseTintG; oB *= g.baseTintB;
       }

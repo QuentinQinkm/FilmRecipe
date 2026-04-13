@@ -23,46 +23,45 @@ No build step. No bundler. No npm. Pure ES modules served statically.
 ## Project Structure
 
 ```
-index.html                  Tab-based layout shell (topbar, canvas, film strip, tabs)
+index.html                  3-tab layout shell (topbar, canvas, film strip, spectrum, tabs)
 styles/main.css             Mobile-first CSS with responsive desktop grid
 src/
-  main.js                   App bootstrap, tab routing, render loop
-  state.js                  Data model: stock templates, blank templates,
-                            control definitions, tonePreset(), applyDevelopment(),
-                            app state, localStorage persistence
+  main.js                   App bootstrap, tab routing, spectrum mounting, render loop
+  state.js                  Data model: stock templates, blank recipe,
+                            control definitions, tonePreset(), complementHue(),
+                            applyDevelopment(), app state, localStorage persistence
   engine/
-    renderer.js             WebGL (GLSL) + Canvas2D CPU fallback rendering engine
+    renderer.js             WebGL (GLSL) rendering engine with up to 5 layers on GPU,
+                            Canvas2D CPU fallback only when WebGL unavailable
   ui/
-    tabs.js                 4-tab content builder (Film/Layers/Base/Develop)
-    topbar.js               Simple/Pro toggle, film strip builder
+    tabs.js                 3-tab content builder (Layers/Base/Develop)
+    topbar.js               Simple/Pro toggle, Save/Save As buttons, film strip builder
     canvas.js               Tap-to-upload, drag-drop, reference overlay, raw toggle
-    spectrum.js             Spectrum-driven layer editor: interactive bell curves
-                            encoding dmax/bandwidth/purity, absorption overlay,
-                            H&D mini-curves, grain dots, stacking visualization
-assets/
-  testIMG.jpg               Test photograph
-  colorChart.png            Synthetic color chart for pipeline validation
+    spectrum.js             Persistent spectrum visualization: interactive bell curves
+                            on desktop (pointer: fine), read-only on touch (pointer: coarse).
+                            Encodes dmax/bandwidth/purity, absorption overlay,
+                            H&D mini-curves, grain dots, stacking visualization.
 docs/plans/                 Historical design and implementation plans
 ```
 
 ## Architecture
 
 ```
-User Input (sliders / spectrum drag)
-       │
-       ▼
-   state.js ─── currentRecipe + labState
-       │
-       ▼
- applyDevelopment() ─── merges dev params onto working recipe
-       │
-       ▼
+User Input (sliders / spectrum drag on desktop)
+       |
+       v
+   state.js --- currentRecipe + labState
+       |
+       v
+ applyDevelopment() --- merges dev params onto working recipe
+       |
+       v
    developed recipe (sent to renderer each frame)
-       │
-       ▼
-  renderer.js ─── WebGL (≤3 layers) or CPU fallback (4-5 layers)
-       │
-       ▼
+       |
+       v
+  renderer.js --- WebGL GPU path (up to 5 layers via float[5] uniform arrays)
+       |            CPU fallback only when WebGL is completely unavailable
+       v
    <canvas> output
 ```
 
@@ -80,41 +79,57 @@ User Input (sliders / spectrum drag)
 6. **DIR inhibition** — inter-layer density suppression (edge sharpness)
 7. **Dye absorption** — Beer-Lambert: complementary hue absorption vectors
 8. **Negative scan** — exponential paper response `1 - exp(-OD * 3.0)`, or raw
-   view with orange mask (mask color controlled by `maskHue` 0-60°)
+   view with orange mask (mask color controlled by `maskHue` 0-60deg)
 9. **Grain** — hash-based noise scaled by crystal size and mid-tone luminance
 10. **Gamma encode** — `l2s()`: back to sRGB for display
 
-The WebGL shader handles exactly 3 layers via `vec3` uniforms. When a custom film
-has 4 or 5 layers, `render()` automatically routes to `_renderCPU()` which loops
-over N layers, then blits the result back through WebGL via a passthrough uniform
-(`uPassthrough`).
+The WebGL shader supports up to 5 layers via `float[5]` uniform arrays and a
+`uLayerCount` uniform. CPU fallback (`_renderCPU`) only activates when WebGL
+is completely unavailable (no browser support).
 
 ## Data Model
+
+### Physics-Based Film Chemistry
+
+There is **no `filmType` enum**. Film behavior emerges from physical properties:
+
+- **Negative vs Positive (slide)**: controlled by `reversal` in `global` (0 = C-41
+  negative process, 1 = E-6 reversal process). This is a bath process, not a
+  per-layer property.
+- **Color vs B&W**: determined by `dyePurity` per layer. `dyePurity < 0.01` = silver
+  halide only (no dye coupler). A film with all layers at `dyePurity < 0.01` renders
+  as B&W. Users can mix color and silver layers freely.
+- **Orange mask**: a base property (`maskDensity` in `global`), always available.
+  Physically meaningful only for negative film but not gated by film type.
+- **Dye hue**: auto-derived from `sensitizerPeak` via `complementHue()` — the dye
+  formed is always the complement of the wavelength the layer absorbs (red-sensitive
+  layer -> cyan dye, green -> magenta, blue -> yellow). `dyeHue` is stored on the
+  layer but auto-updated whenever `sensitizerPeak` changes.
 
 ### Recipe Object
 
 ```js
 {
-  filmType: 'negative' | 'positive' | 'bw',
   layers: [
     {
       name: 'cyan',
       sensitizerPeak: 620,   // nm — wavelength of peak sensitivity
       sensitizerBw: 80,      // nm — Gaussian bandwidth (FWHM)
-      dyeHue: 185,           // degrees — dye coupler hue
-      dyePurity: 0.70,       // 0-1 — color saturation of formed dye
+      dyeHue: 185,           // degrees — auto-derived from sensitizerPeak via complementHue()
+      dyePurity: 0.70,       // 0-1 — dye coupler presence (0 = silver/B&W, >0 = color)
       dmax: 2.1,             // max optical density
       hdToe: 0.22,           // H&D shadow compression zone
       hdGamma: 0.68,         // H&D slope (contrast)
       hdShoulder: 0.18,      // H&D highlight rolloff zone
       crystalSize: 0.35,     // grain size factor
     },
-    // ... up to 5 layers for custom films
+    // ... up to 5 layers
   ],
   global: {
+    reversal: 0,             // 0 = negative (C-41), 1 = positive/slide (E-6)
     stackingStrength: 0,     // 0-1 — how strongly upper layers attenuate light for lower ones
-    maskDensity: 0.42,       // orange mask strength (negative only)
-    maskHue: 28,             // 0-60° — shifts orange mask color (0=red-orange, 28=classic, 60=yellow-orange)
+    maskDensity: 0.42,       // orange mask strength
+    maskHue: 28,             // 0-60 deg — shifts orange mask color
     dirInhibition: 0.35,     // DIR coupler strength
     baseTintR: 1.0,          // film base tint RGB
     baseTintG: 0.97,
@@ -127,7 +142,8 @@ over N layers, then blits the result back through WebGL via a passthrough unifor
 
 - `currentRecipe` — the working recipe, always mutable
 - `labState` — development environment controls (temperature, time, agitation, etc.)
-- `activeTab` — 'film' | 'layers' | 'base' | 'develop'
+- `activeTab` — 'layers' | 'base' | 'develop'
+- `selectedLayerIdx` — index of the currently selected layer (synced between spectrum and tabs)
 - `currentTemplate` — name of last-selected stock template
 - `recipeName` — name of current saved recipe (empty for unsaved)
 - `isDirty` — true when recipe modified since last save/load
@@ -137,114 +153,143 @@ over N layers, then blits the result back through WebGL via a passthrough unifor
 ### Stock Templates
 
 Six built-in films: Portra 400, Gold 200, Velvia 50, Kodachrome 64, Ilford HP5,
-Kodak Tri-X. Defined as `STOCK_TEMPLATES` in `state.js`.
+Kodak Tri-X. Defined as `STOCK_TEMPLATES` in `state.js`. Film type is derived from
+properties: positive films have `reversal: 1`, B&W films have `dyePurity: 0` on all
+layers, negative films have `reversal: 0` with color layers.
+
+### Key Functions in `state.js`
+
+- `complementHue(wl)` — piecewise linear map from sensitizer wavelength to
+  complementary dye hue. Uses SPECTRAL_STOPS lookup + 180deg rotation.
+- `tonePreset(t)` / `toneFromHD(gamma)` — convert between 0-1 tone slider and
+  hdToe/hdGamma/hdShoulder triplet.
+- `applyDevelopment(recipe, lab)` — non-destructive: clones recipe, applies
+  developer activity, temperature, time, agitation, freshness effects.
+- `makeDefaultLayer(index)` — creates a new layer with auto-derived dyeHue.
 
 ## Unified Recipe Model
 
 Every film is a recipe. Stock presets are read-only sources — selecting one clones
 it into the working recipe, fully editable. There is no stock vs custom mode split.
 
-### 4-Tab Layout
+### 3-Tab Layout
 
-- **Film tab** — Film type toggle (Negative/Positive/B&W), always-editable spectrum
-  canvas, Save/Save As/Upload actions
-- **Layers tab** — Per-layer slider sections with add/remove/reorder. Simple mode:
-  Tone + Reversal + Grain. Pro mode adds expandable H&D Curve Parameters.
-  B&W shows single Panchromatic layer.
-- **Base tab** — Global controls (stacking, DIR, base tint) + orange mask (negative only)
-- **Develop tab** — Development environment sliders + generated Lab Notes
+- **Layers tab** — Per-layer slider sections with all chemistry controls:
+  Color sensitivity (sensitizerPeak), Sensitivity range (sensitizerBw),
+  Color richness (dyePurity), Max density (dmax), Tone, Grain (crystalSize).
+  Pro mode adds expandable H&D Curve Parameters (toe, gamma, shoulder).
+  Layers can be added (up to 5), removed, and reordered. Selected layer is
+  highlighted and synced with spectrum pointer.
+- **Base tab** — Global controls (reversal process, stacking, DIR, base tint)
+  + orange mask section.
+- **Develop tab** — Development environment sliders + generated Lab Notes.
 
-### Spectrum Interactions
+### Persistent Spectrum
 
-Five parameters are encoded directly into the visual/interactive geometry:
-- Drag **pointer horizontally** → `sensitizerPeak`
-- Drag **bell curve edges** → `sensitizerBw` (bandwidth)
-- Drag **bell curve top** up/down → `dmax` (density)
-- Bell **fill opacity** → `dyePurity`
-- Pointer **fill color** → `dyeHue`
+The spectrum canvas lives **outside the tab system** (in `#spectrum-bar`), always
+visible between the film strip and tab content. It is not rebuilt on tab switch.
 
-Click a pointer → popup/bottom-sheet with sliders for peak, bandwidth, density,
-dye color, purity, contrast.
+**Touch-first design:**
+- On **touch devices** (`pointer: coarse`): spectrum is a read-only visualization.
+  Tapping a pointer selects that layer (highlights it, syncs `selectedLayerIdx`),
+  but no dragging. Drag handles (dmax top, bandwidth edges) are hidden. All editing
+  happens via sliders in the Layers tab.
+- On **desktop** (`pointer: fine`): full drag interactivity — drag pointers
+  horizontally (sensitizerPeak), drag bell tops vertically (dmax), drag bell edges
+  (sensitizerBw). Cursor changes on hover.
+
+**Spectrum API** (returned by `buildSpectrum()`):
+- `repaint()` — redraw (call after slider changes)
+- `setRecipe(recipe)` — update the displayed recipe
+- `setActiveLayer(idx)` — highlight a specific layer
+- `destroy()` — cleanup
 
 ### Film Strip
 
 Persistent horizontal scroll row between image and tab content. Stock template
-chips grouped by type (negative/positive/B&W), user-saved films after a separator
-with delete affordance, "+ New" chip at the end.
+chips auto-grouped by derived type (B&W if all `dyePurity < 0.01`, reversal if
+`global.reversal`, else negative), user-saved films after a separator with delete
+affordance, "+ New" chip at the end.
+
+### Topbar
+
+Contains: wordmark, Save button (disabled when no recipe name), Save As button,
+Simple/Pro mode toggle.
 
 ## Spectrum UI (`src/ui/spectrum.js`)
 
 Canvas layout (top to bottom):
-- **Rainbow bar** (24px) — visible spectrum 380–700nm
-- **Absorption band** (8px) — combined spectral absorption of all layers; darker = more absorption at that wavelength
-- **Bell curves** (100px) — one per layer with interactive geometry:
-  - Height = `dmax` (draggable handle at top)
-  - Width = `sensitizerBw` (draggable handles at FWHM edges)
-  - Fill opacity = `dyePurity`
-  - **H&D mini-curve** inside each bell peak (sparkline of toe/gamma/shoulder shape)
-  - **Grain dots** at base (coarseness matches `crystalSize`)
-  - **Overlap zones** highlighted where bells intersect (indicates spectral competition)
-  - **Stacking dimming** — lower layers progressively dimmed based on `stackingStrength`
-- **Pointers** (32px) — pin-shaped markers at `sensitizerPeak`, colored by `dyeHue`
+- **Rainbow bar** (24px) — visible spectrum 380-700nm
+- **Absorption band** (8px) — combined spectral absorption of all layers
+- **Bell curves** (100px) — one per layer with visual encoding:
+  - Height = `dmax`
+  - Width = `sensitizerBw`
+  - Fill opacity = `dyePurity` (dimmed for non-selected layers)
+  - Stroke = brighter/thicker for selected layer
+  - **H&D mini-curve** inside each bell peak
+  - **Grain dots** at base
+  - **Overlap zones** highlighted where bells intersect
+  - **Stacking dimming** — lower layers progressively dimmed by `stackingStrength`
+- **Pointers** (32px) — pin markers at `sensitizerPeak`, colored by `dyeHue`,
+  outlined white when selected
 
-Interactions:
-- Drag pointer horizontally → change `sensitizerPeak`
-- Drag bell top vertically → change `dmax`
-- Drag bell edges horizontally → change `sensitizerBw`
-- Click pointer → popup with sliders for peak, bandwidth, density, dye color, purity, contrast
-- Cursor changes to `ns-resize` / `ew-resize` / `grab` on hover over interactive zones
-- On screens < 600px, popup becomes a bottom sheet
-- Spectrum is always editable (no read-only mode)
+Desktop-only interactions (hidden on `pointer: coarse`):
+- Drag pointer horizontally -> `sensitizerPeak` (auto-updates `dyeHue`)
+- Drag bell top vertically -> `dmax`
+- Drag bell edges horizontally -> `sensitizerBw`
+- Hover cursor changes to `ns-resize` / `ew-resize` / `grab`
+
+Both touch and desktop:
+- Tap/click pointer -> selects that layer (`onLayerSelect` callback)
 
 ## Touch-Friendly & Responsive Design
 
-- Mobile-first flexbox column layout with 4-tab bottom bar
+- Mobile-first flexbox column layout with 3-tab bottom bar
 - Dark theme with near-black backgrounds (`--bg: #0c0c0c`) for photography focus
 - Pointer Events API throughout (works for mouse and touch)
-- `touch-action: none` on spectrum canvas, larger pointer/hit test radii (18px)
+- `matchMedia('(pointer: fine)')` determines input mode at startup
+- `touch-action: none` on spectrum canvas
 - `@media (pointer: coarse)` enlarges slider thumbs to 24px, film chips to 44px min
 - Mobile: tab content at bottom (max-height 42vh, scrollable), tab bar at bottom
-- Desktop (768px+): CSS Grid sidebar layout — tabs/content/strip on left, canvas on right
+- Desktop (768px+): CSS Grid sidebar layout — tabs/spectrum/content/strip on left,
+  canvas on right
 - Wide (1400px+): wider sidebar (420px)
 - Safe area insets for notched devices (`env(safe-area-inset-*)`)
-- Spectrum popup becomes a bottom sheet on screens < 600px
 - Film strip with horizontal momentum scroll and scroll-snap
+- Selected layer section gets a subtle highlight border
 
 ## Design Decisions
 
+- **No filmType enum** — film behavior (negative/positive/B&W) emerges from physical
+  properties: `reversal` (global process), `dyePurity` (per-layer coupler presence),
+  `maskDensity` (base property). This matches real film chemistry where these are
+  independent properties, not a type selector.
+- **Auto-derived dyeHue** — `dyeHue = complementHue(sensitizerPeak)`. In real film,
+  the dye formed is always the spectral complement of the absorbed wavelength. This
+  is auto-updated on peak changes; `dyeHue` is not directly user-editable.
 - **3-wavelength spectral model** (625, 540, 450nm) — a deliberate trade-off.
   Full 380-700nm integration would cost ~20x more per pixel for marginal visual
-  benefit. The effective useful range for custom layer peaks is ~440-620nm;
-  peaks outside this range still produce plausible (if attenuated) results via
-  the Gaussian tail. A 7-point model could be a future upgrade if needed.
-- **Universal engine, many presets** — every stock template (Portra 400, Velvia 50,
-  Tri-X, etc.) is just a recipe object with different parameter values fed into
-  the same rendering pipeline. There is no per-film special-case code. Selecting
-  any template clones it into the working recipe for direct editing. Development
-  parameters are applied via `applyDevelopment()` in state.js.
+  benefit. The effective useful range for custom layer peaks is ~440-620nm.
+- **Universal engine, many presets** — every stock template is just a recipe object
+  with different parameter values fed into the same rendering pipeline. There is no
+  per-film special-case code.
 - **Stacking uses pre-reversal density** — for positive (slide) film, the
   Beer-Lambert stacking attenuation is computed from the raw H&D density before
-  the reversal step (`dmax - d`). This matches the physical reality: light
-  passes through undeveloped emulsion layers top-to-bottom before any reversal
-  processing occurs.
+  the reversal step. This matches physical reality.
+- **Touch-first spectrum** — spectrum is read-only visualization on touch devices.
+  Bell curve drag handles are precision mouse tools unsuitable for finger input.
+  Sliders in the Layers tab are the primary input for touch users.
 
 ## Known Limitations / Future Work
 
-- **CPU fallback for 4-5 layers is not 60fps** — acceptable for experimentation,
-  but the iPhone app will need a Metal compute shader for N layers.
 - **No undo/redo** — would benefit from a command stack on recipe mutations.
 - **No export** — processed image can't be saved yet (add canvas `toBlob()` download).
 - **No preset sharing** — recipes are localStorage only; add JSON import/export.
-- **WebGL shader is 3-layer only** — could be extended with a loop and texture-based
-  uniform packing to handle N layers on GPU.
 - **Scan exposure hardcoded** — the negative scan factor (`3.0`) could be a user
   parameter for simulating different paper grades / scanner contrast.
 - **baseTintR/G/B as 3 sliders** — a single warmth slider or small color picker
   would be more intuitive for this 3-component control.
 - **iPhone native port** — Core Image / Metal pipeline, AVFoundation camera integration.
-  Apple does expose camera APIs to third-party apps (ProRAW, depth, etc.) but
-  computational photography features (Deep Fusion, Photonic Engine) are not directly
-  accessible; the app would apply film simulation as a post-process on RAW/ProRAW frames.
 
 ## Coding Conventions
 
