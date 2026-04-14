@@ -59,11 +59,16 @@ User Input (sliders / spectrum drag on desktop)
    developed recipe (sent to renderer each frame)
        |
        v
-  renderer.js --- WebGL GPU path: 4-pass pipeline
-       |            Pass 1: Density shader — per-layer density + grain noise → FBO (RGBA channels)
-       |            Pass 2: Horizontal Gaussian blur (per-channel = per-layer independent blur)
-       |            Pass 3: Vertical Gaussian blur
-       |            Pass 4: Compositing shader — DIR + dye absorption + mask/tint → screen
+  renderer.js --- WebGL GPU path: up to 8-pass pipeline
+       |            Pass 1: Density shader — per-layer density + grain noise → FBO A
+       |            Pass 2: Horizontal Gaussian blur (per-channel = per-layer) FBO A → FBO B
+       |            Pass 3: Vertical Gaussian blur FBO B → FBO A
+       |            Pass 4: Compositing shader — DIR + dye absorption + mask/tint → screen (or FBO C)
+       |            Pass 5-8: Halation (optional, when halation > 0):
+       |              5: Threshold bright pixels FBO C → FBO A
+       |              6: H-blur bloom FBO A → FBO B (radius 20px)
+       |              7: V-blur bloom FBO B → FBO A
+       |              8: Blend scene + bloom → screen
        |            CPU fallback only when WebGL is completely unavailable
        v
    <canvas> output
@@ -86,7 +91,8 @@ User Input (sliders / spectrum drag on desktop)
 8. **Dye absorption** — Beer-Lambert: complementary hue absorption vectors
 9. **Negative scan** — exponential paper response with fog floor subtraction:
    the composite shader subtracts the fog-only optical density from the total OD
-   before applying `1 - exp(-imageOD * 3.0)`. This simulates real film scanners
+   before applying `1 - exp(-imageOD * scanExposure)`. The scan exposure (paper grade)
+   is user-controllable (range 1.0–6.0, default 3.0). This simulates real film scanners
    that calibrate against the unexposed film strip to set the black level — areas
    with only fog density render as true black, not muddy gray. Raw view shows
    transmittance with orange mask (mask color controlled by `maskHue` 0-60deg).
@@ -108,22 +114,30 @@ User Input (sliders / spectrum drag on desktop)
 11. **Per-layer Gaussian blur (grain + resolving power)** — separable Gaussian
    blur applied to per-layer densities via 2 render passes (H + V). Each layer's
    density is stored in a separate RGBA channel so the blur operates independently
-   per layer before dye absorption compositing. Blur radius = `maxCrystalSize × GRAIN_PX`.
-   This simultaneously:
+   per layer before dye absorption compositing. Blur radius =
+   `maxCrystalSize × GRAIN_PX × grainSoftness` (GRAIN_PX=5, grainSoftness is
+   user-controllable 0.5×–3.0×). This simultaneously:
    - Converts per-pixel white noise into organic grain clumps
    - Softens each layer to match film resolving power
    - Couples image sharpness to crystal size: coarse grain = soft image
    - Preserves physical correctness: `blur(composite(A,B)) ≠ composite(blur(A),blur(B))`
    - Minimum blur floor of 0.5px ensures per-pixel noise is always smoothed into
      organic clumps, even at very fine crystal sizes
+   - Grain softness decouples spatial softness from amplitude: users can have
+     large/visible grain that's either punchy (low softness) or creamy (high softness)
 12. **Compositing** — reads blurred per-layer densities, applies DIR inhibition,
-   dye absorption (Beer-Lambert), reversal, orange mask, base tint
-13. **Gamma encode** — `l2s()`: back to sRGB for display
+   dye absorption (Beer-Lambert), reversal, orange mask, base tint (derived from
+   single warmth slider: R=1+w×0.06, G=1.0, B=1-w×0.12)
+13. **Halation (optional)** — when `halation > 0`, adds a warm highlight glow:
+   threshold-extracts bright pixels (lum > 0.65), blurs with large radius (20px),
+   and blends back additively with warm tint (1.0, 0.55, 0.25). Uses 3rd FBO (C)
+   for intermediate storage. Portra 400 and Gold 200 have non-zero defaults.
+14. **Gamma encode** — `l2s()`: back to sRGB for display
 
-The WebGL pipeline uses 3 shader programs (density, blur, compositing) with 2
-framebuffer objects. Per-layer densities are packed into RGBA channels (up to 4
-layers with per-layer blur via RGBA channel packing). FBO textures use
-UNSIGNED_BYTE with density scaled by 1/4.0 to fit 0-4.0 range. CPU fallback
+The WebGL pipeline uses 5 shader programs (density, blur, compositing, threshold,
+halation blend) with 3 framebuffer objects. Per-layer densities are packed into RGBA
+channels (up to 4 layers with per-layer blur via RGBA channel packing). FBO textures
+use UNSIGNED_BYTE with density scaled by 1/4.0 to fit 0-4.0 range. CPU fallback
 (`_renderCPU`) uses matching per-layer Float32Array blur and only activates when
 WebGL is completely unavailable.
 
@@ -172,9 +186,10 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
     maskDensity: 0.42,       // orange mask strength
     maskHue: 28,             // 0-60 deg — shifts orange mask color
     dirInhibition: 0.35,     // DIR coupler strength
-    baseTintR: 1.0,          // film base tint RGB
-    baseTintG: 0.97,
-    baseTintB: 0.94,
+    baseTintWarmth: 0.5,     // -1 (cool/blue) to +1 (warm/amber), derives RGB tint
+    scanExposure: 3.0,       // scanning contrast / paper grade (1.0-6.0)
+    grainSoftness: 1.50,     // blur radius multiplier (0.5-3.0×) — spatial softness of grain
+    halation: 0.25,          // highlight glow strength (0-1)
   }
 }
 ```
@@ -244,7 +259,10 @@ a derived display, not a separate parameter. Bigger crystals = faster film = hig
 | `maskDensity` | Mask density | 0-1 | Orange mask strength (for negative film). Physically compensates for unwanted dye absorptions. Higher = more orange base. |
 | `maskHue` | Mask hue | 0-60° | Shifts the orange mask color from yellow (0) through orange to red-orange (60). |
 | `dirInhibition` | DIR couplers | 0-1 | Developer Inhibitor Releasing coupler strength. Creates inter-layer density suppression at edges, increasing apparent sharpness and reducing color fringing. |
-| `baseTintR/G/B` | Base tint | 0-1 each | RGB tint of the film base itself. Slight warmth (R>G>B) simulates real film base color. |
+| `baseTintWarmth` | Base tint warmth | -1 to 1 | Film base warmth. -1 = cool/blue, 0 = neutral, +1 = warm/amber. Derives RGB: R=1+w×0.06, G=1.0, B=1-w×0.12. |
+| `scanExposure` | Scan exposure | 1.0-6.0 | Scanning contrast / paper grade. Controls the exponential response in negative scanning. Low = flat, high = punchy. |
+| `grainSoftness` | Grain softness | 0.5×-3.0× | Multiplier on blur radius. Controls spatial softness of grain independently from crystal size (amplitude). Low = punchy/sharp, high = creamy/soft. |
+| `halation` | Halation strength | 0-1 | Warm highlight glow from light scattering through film base. Adds large-radius blurred bright pixels with warm tint. |
 
 ### Development Parameters (Lab State)
 
@@ -270,12 +288,13 @@ The curve maps log-exposure to density.
 
 **Crystal size → grain + ISO + resolving power:** Larger crystals gather more light
 (higher ISO / faster film) but produce coarser grain AND softer images. The grain noise
-amplitude uses binomial statistics: `N = 1/(cs² + 0.01)`. The Gaussian blur radius
-scales with crystal size (`maxCS × GRAIN_PX`, where GRAIN_PX=3), with a minimum floor
-of 0.5px. This simultaneously creates grain clumps and limits resolving power. Examples:
-Velvia 50 (cs=0.15) gets 0.5px blur (nearly sharp, invisible grain), Portra 400 (cs=0.35)
-gets 1.05px (slight softening, fine grain), Tri-X (cs=0.90) gets 2.7px (noticeable
-softening, prominent grain). This couples all three: coarse grain = high ISO = soft image.
+amplitude uses binomial statistics: `N = 1/(cs² + 0.01)`. The Gaussian blur radius =
+`maxCS × GRAIN_PX × grainSoftness` (GRAIN_PX=5), with a minimum floor of 0.5px. This
+simultaneously creates grain clumps and limits resolving power. Examples at softness=1.0:
+Velvia 50 (cs=0.15) gets 0.75px blur (fine grain), Portra 400 (cs=0.35) gets 1.75px
+(moderate softening), Tri-X (cs=0.90) gets 4.5px (strong softening). But Portra's
+default softness=1.50 gives 2.6px (creamy), while Tri-X's softness=0.70 gives 3.15px
+(punchy despite large crystals). This decouples grain amplitude from spatial character.
 
 **dyePurity → grain amplitude:** `dyePurity < 0.01` triggers silver grain (1.2× amplitude).
 Higher purity triggers dye cloud grain (0.7× amplitude). After blur, both form organic
@@ -311,7 +330,7 @@ it into the working recipe, fully editable. There is no stock vs custom mode spl
   Sensitizer peak, Sensitizer bandwidth, Emulsion type toggle (Silver / Color dye),
   Dye purity (color only), Dmax, collapsible H&D Curve (interactive canvas with
   toe/gamma/shoulder drag handles + fog slider), Crystal size with derived ISO readout.
-  Layers can be added (up to 5), removed, and reordered. Selected layer is
+  Layers can be added (up to 4), removed, and reordered. Selected layer is
   highlighted and synced with spectrum pointer.
 - **Base tab** — Global controls (reversal process, stacking, DIR, base tint)
   + orange mask section.
@@ -346,7 +365,8 @@ affordance, "+ New" chip at the end.
 
 ### Topbar
 
-Contains: wordmark, Save button (disabled when no recipe name), Save As button.
+Contains: wordmark, Export button (downloads rendered image as PNG), Save button
+(disabled when no recipe name), Save As button.
 
 ## Spectrum UI (`src/ui/spectrum.js`)
 
@@ -456,12 +476,12 @@ Each layer has a collapsible "H&D Curve" section containing an interactive canva
 ## Known Limitations / Future Work
 
 - **No undo/redo** — would benefit from a command stack on recipe mutations.
-- **No export** — processed image can't be saved yet (add canvas `toBlob()` download).
 - **No preset sharing** — recipes are localStorage only; add JSON import/export.
-- **Scan exposure hardcoded** — the negative scan factor (`3.0`) could be a user
-  parameter for simulating different paper grades / scanner contrast.
-- **baseTintR/G/B as 3 sliders** — a single warmth slider or small color picker
-  would be more intuitive for this 3-component control.
+- **Per-layer blur radii** — currently all layers share the max crystal size for blur
+  radius. Separate blur per layer would be more physically accurate but requires N
+  blur passes instead of 1.
+- **Reciprocity failure** — per-layer exposure correction for long/short durations.
+  Would need an exposure time input and per-layer correction curves.
 - **iPhone native port** — Core Image / Metal pipeline, AVFoundation camera integration.
 
 ## Coding Conventions

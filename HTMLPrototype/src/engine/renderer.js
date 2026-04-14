@@ -7,7 +7,7 @@ void main() {
 }`;
 
 const MAX_LAYERS = 4;
-const GRAIN_PX = 3;     // crystalSize * GRAIN_PX = blur radius in pixels
+const GRAIN_PX = 5;     // crystalSize * GRAIN_PX = base blur radius in pixels
 const GRAIN_CHROMA = 0.25; // fraction of grain that's per-layer (color); rest is shared (luminance)
 
 // ---------------------------------------------------------------------------
@@ -622,7 +622,8 @@ export class FilmRenderer {
     const g = recipe.global;
 
     const maxCS = Math.max(...L.map(l => l.crystalSize || 0.3));
-    const blurRadius = Math.max(Math.min(maxCS * GRAIN_PX, 15), 0.5);
+    const softness = g.grainSoftness ?? 1.0;
+    const blurRadius = Math.max(Math.min(maxCS * GRAIN_PX * softness, 15), 0.5);
     const needsBlur = this.fboA && this.fboB;
 
     // --- Pass 1: Density shader → FBO A ---
@@ -888,7 +889,8 @@ export class FilmRenderer {
 
     // --- Per-layer Gaussian blur ---
     const maxCS = Math.max(...layers.map(l => l.crystalSize || 0.3));
-    const blurRadius = Math.max(Math.min(maxCS * GRAIN_PX, 15), 0.5);
+    const softness = g.grainSoftness ?? 1.0;
+    const blurRadius = Math.max(Math.min(maxCS * GRAIN_PX * softness, 15), 0.5);
 
     {
       const r = Math.ceil(blurRadius);
