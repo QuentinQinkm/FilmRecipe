@@ -6,6 +6,7 @@ import {
   applyDevelopment,
   saveCustomRecipe,
   loadSavedRecipes,
+  makeDefaultLayer,
   LAB_DEFAULTS,
   STOCK_TEMPLATES,
 } from '@filmstate'
@@ -54,6 +55,16 @@ export function RecipeProvider({ children }) {
     setIsDirty(false)
   }, [recipe])
 
+  const addLayer = useCallback(() => {
+    setRecipe(r => {
+      const next = cloneRecipe(r)
+      if (next.layers.length >= 4) return r
+      next.layers.push(makeDefaultLayer(next.layers.length))
+      return next
+    })
+    setIsDirty(true)
+  }, [])
+
   const resetNew = useCallback(() => {
     setRecipe(createBlankRecipe())
     setCurrentTemplate('')
@@ -73,6 +84,7 @@ export function RecipeProvider({ children }) {
       setLayerParam,
       setGlobalParam,
       setLabParam,
+      addLayer,
       loadTemplate,
       saveAs,
       resetNew,
