@@ -67,6 +67,21 @@ document.querySelectorAll('#tab-bar .tab').forEach(btn => {
 // Canvas
 const canvasUI = initCanvas(renderer, renderIfImage);
 
+// Export / Download
+document.getElementById('export-btn').addEventListener('click', () => {
+  if (!canvasUI.hasImage) return;
+  const templateName = (state.currentTemplate || 'filmlab').replace(/\s+/g, '-').toLowerCase();
+  outputCanvas.toBlob(blob => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${templateName}-${Date.now()}.png`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, 'image/png');
+});
+
 // Topbar + film strip
 initTopbar({
   onTemplateChange() {
