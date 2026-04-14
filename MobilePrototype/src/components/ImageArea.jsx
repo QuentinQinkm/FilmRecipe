@@ -5,6 +5,7 @@ import './ImageArea.css'
 
 export function ImageArea({ section, onSectionPress, onNextPress, onFullscreen }) {
   const canvasRef = useRef(null)
+  const inputRef = useRef(null)
   const { developedRecipe } = useRecipe()
   const { loadImage, hasImage } = useRenderer(canvasRef, developedRecipe)
 
@@ -14,13 +15,13 @@ export function ImageArea({ section, onSectionPress, onNextPress, onFullscreen }
   }, [loadImage])
 
   const handleTap = useCallback(() => {
-    if (!hasImage) document.getElementById('img-input').click()
+    if (!hasImage) inputRef.current?.click()
   }, [hasImage])
 
   return (
     <div className="image-area" onClick={handleTap}>
       <input
-        id="img-input" type="file" accept="image/*" hidden
+        ref={inputRef} type="file" accept="image/*" hidden
         onChange={handleFileInput}
       />
       {!hasImage && (

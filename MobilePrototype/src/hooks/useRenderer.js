@@ -1,9 +1,9 @@
-import { useRef, useEffect, useCallback } from 'react'
+import { useRef, useEffect, useCallback, useState } from 'react'
 import { FilmRenderer } from '@engine/renderer.js'
 
 export function useRenderer(canvasRef, developedRecipe, rawMode = false) {
   const rendererRef = useRef(null)
-  const imageLoadedRef = useRef(false)
+  const [imageLoaded, setImageLoaded] = useState(false)
 
   // Init/destroy renderer with the canvas
   useEffect(() => {
@@ -22,24 +22,25 @@ export function useRenderer(canvasRef, developedRecipe, rawMode = false) {
 
   // Re-render whenever recipe changes (if image is loaded)
   useEffect(() => {
-    if (!rendererRef.current || !imageLoadedRef.current) return
+    if (!rendererRef.current || !imageLoaded) return
     try {
       rendererRef.current.render(developedRecipe, rawMode)
     } catch (e) {
       console.warn('FilmRenderer render failed:', e.message)
     }
-  }, [developedRecipe, rawMode])
+  }, [developedRecipe, rawMode, imageLoaded])
 
   const loadImage = useCallback((src) => {
     const img = new Image()
     img.onload = () => {
+      URL.revokeObjectURL(src)
       if (!canvasRef.current) return
       canvasRef.current.width = img.naturalWidth
       canvasRef.current.height = img.naturalHeight
       if (rendererRef.current) {
         try {
           rendererRef.current.setImage(img, img.naturalWidth, img.naturalHeight)
-          imageLoadedRef.current = true
+          setImageLoaded(true)
           rendererRef.current.render(developedRecipe, rawMode)
         } catch (e) {
           console.warn('FilmRenderer setImage/render failed:', e.message)
@@ -49,5 +50,5 @@ export function useRenderer(canvasRef, developedRecipe, rawMode = false) {
     img.src = src
   }, [canvasRef, developedRecipe, rawMode])
 
-  return { loadImage, hasImage: imageLoadedRef.current }
+  return { loadImage, hasImage: imageLoaded }
 }
