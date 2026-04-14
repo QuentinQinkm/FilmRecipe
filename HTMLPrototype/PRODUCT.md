@@ -59,7 +59,11 @@ User Input (sliders / spectrum drag on desktop)
    developed recipe (sent to renderer each frame)
        |
        v
-  renderer.js --- WebGL GPU path (up to 5 layers via float[5] uniform arrays)
+  renderer.js --- WebGL GPU path: 4-pass pipeline
+       |            Pass 1: Density shader — per-layer density + grain noise → FBO (RGBA channels)
+       |            Pass 2: Horizontal Gaussian blur (per-channel = per-layer independent blur)
+       |            Pass 3: Vertical Gaussian blur
+       |            Pass 4: Compositing shader — DIR + dye absorption + mask/tint → screen
        |            CPU fallback only when WebGL is completely unavailable
        v
    <canvas> output
@@ -84,21 +88,34 @@ User Input (sliders / spectrum drag on desktop)
    view with orange mask (mask color controlled by `maskHue` 0-60deg)
 10. **Per-layer grain** — physics-based crystal emulation applied at the density
    stage (before dye absorption), independently per layer:
-   - **Binomial statistics**: `sigma = sqrt(p*(1-p)/N)` where `N = 1/(cs²+0.01)`
-     crystals per cell and `p = density/dmax` is develop probability
-   - **Jittered cell hashing**: breaks grid alignment by offsetting cell centers
-     with per-cell random jitter
-   - **Multi-octave noise**: two crystal scales blended 70/30 for natural size
-     distribution
-   - **Per-layer seeds**: each layer gets an independent hash seed so grain
-     patterns are uncorrelated across layers
-   - Grain IS the density variation (crystal develop/don't-develop), not a
-     post-process overlay
-11. **Gamma encode** — `l2s()`: back to sRGB for display
+   - **White noise injection**: cheap per-pixel sin-hash noise at density stage.
+     No grid or cell structure — no moiré artifacts possible.
+   - **Binomial statistics**: amplitude `sigma = sqrt(p*(1-p)/N)` where
+     `N = 1/(cs²+0.01)` and `p = density/dmax`
+   - **Silver grain** (`dyePurity < 0.01`): amplitude 1.2× sigma
+   - **Dye cloud grain** (`dyePurity >= 0.01`): amplitude 0.7× sigma
+   - **Per-layer seeds**: independent noise per layer
+   - Grain IS the density variation, not a post-process overlay
+11. **Per-layer Gaussian blur (grain + resolving power)** — separable Gaussian
+   blur applied to per-layer densities via 2 render passes (H + V). Each layer's
+   density is stored in a separate RGBA channel so the blur operates independently
+   per layer before dye absorption compositing. Blur radius = `maxCrystalSize × GRAIN_PX`.
+   This simultaneously:
+   - Converts per-pixel white noise into organic grain clumps
+   - Softens each layer to match film resolving power
+   - Couples image sharpness to crystal size: coarse grain = soft image
+   - Preserves physical correctness: `blur(composite(A,B)) ≠ composite(blur(A),blur(B))`
+   - When blur radius < 0.5px, blur passes are skipped entirely
+12. **Compositing** — reads blurred per-layer densities, applies DIR inhibition,
+   dye absorption (Beer-Lambert), reversal, orange mask, base tint
+13. **Gamma encode** — `l2s()`: back to sRGB for display
 
-The WebGL shader supports up to 5 layers via `float[5]` uniform arrays and a
-`uLayerCount` uniform. CPU fallback (`_renderCPU`) only activates when WebGL
-is completely unavailable (no browser support).
+The WebGL pipeline uses 3 shader programs (density, blur, compositing) with 2
+framebuffer objects. Per-layer densities are packed into RGBA channels (up to 4
+layers with per-layer blur; 5th layer supported without blur). FBO textures use
+UNSIGNED_BYTE with density scaled by 1/4.0 to fit 0-4.0 range. CPU fallback
+(`_renderCPU`) uses matching per-layer Float32Array blur and only activates when
+WebGL is completely unavailable.
 
 ## Data Model
 
@@ -200,8 +217,9 @@ Each layer models one emulsion coating on the film strip. Up to 5 layers stacked
 
 **Emulsion type toggle:** Silver vs Color dye. Silver sets `dyePurity = 0` and hides
 the dye purity slider. Color dye restores the previous dyePurity value. Silver layers
-produce sharp per-pixel grain; color layers produce softer dye cloud grain (neighborhood-
-averaged). A film with all silver layers renders as B&W.
+produce higher-amplitude grain (1.2×); color layers produce lower-amplitude dye cloud
+grain (0.7×). Both are blurred by the Gaussian blur passes. A film with all silver
+layers renders as B&W.
 
 **ISO readout:** Displayed next to crystal size value (e.g. `0.30 (~ISO 179)`). This is
 a derived display, not a separate parameter. Bigger crystals = faster film = higher ISO.
@@ -239,14 +257,16 @@ define the density response curve. Fog lifts the floor (Dmin). Toe and shoulder 
 the curved transition zones. Gamma sets the slope between them. Dmax clamps the ceiling.
 The curve maps log-exposure to density.
 
-**Crystal size → grain + ISO:** Larger crystals gather more light (higher ISO / faster
-film) but produce coarser grain. The grain noise model uses binomial statistics:
-`N = 1/(cs² + 0.01)` crystals per cell. Fewer crystals = more visible randomness.
+**Crystal size → grain + ISO + resolving power:** Larger crystals gather more light
+(higher ISO / faster film) but produce coarser grain AND softer images. The grain noise
+amplitude uses binomial statistics: `N = 1/(cs² + 0.01)`. The Gaussian blur radius
+scales with crystal size (`maxCS × GRAIN_PX`), simultaneously creating grain clumps and
+limiting resolving power. This couples all three: coarse grain = high ISO = soft image.
 
-**dyePurity → grain character:** `dyePurity < 0.01` triggers silver grain (sharp, per-pixel
-noise). Higher purity triggers dye cloud grain (softer, neighborhood-averaged). This
-matches real film: B&W silver grains are individual crystals; color film grain is
-diffused dye clouds around crystal sites.
+**dyePurity → grain amplitude:** `dyePurity < 0.01` triggers silver grain (1.2× amplitude).
+Higher purity triggers dye cloud grain (0.7× amplitude). After blur, both form organic
+clumps — silver produces high-contrast monochrome clumps; color produces luminance
+variation with subtle color fringing from uncorrelated per-layer noise patterns.
 
 **Stacking × layer order:** With `stackingStrength > 0`, upper layers (lower array index)
 absorb light via Beer-Lambert before it reaches lower layers. This means layer order
@@ -395,11 +415,19 @@ Each layer has a collapsible "H&D Curve" section containing an interactive canva
 - **Touch-first spectrum** — spectrum is read-only visualization on touch devices.
   Bell curve drag handles are precision mouse tools unsuitable for finger input.
   Sliders in the Layers tab are the primary input for touch users.
-- **Per-layer grain at density stage** — grain is not a post-process noise overlay.
-  Each layer's grain models binomial crystal develop statistics independently,
-  applied before dye absorption. This means color film grain has uncorrelated
-  patterns per color channel (as in real C-41/E-6), and B&W grain character
-  differs naturally from color grain without special-case code.
+- **Multi-pass grain (white noise + per-layer blur)** — v1 used per-pixel sin-hash
+  (salt-and-pepper), v2 used value noise on a grid (moiré artifacts, no image
+  coupling). v3 injects cheap per-pixel white noise per layer, then applies a
+  separable Gaussian blur to each layer's density independently before dye
+  absorption compositing. The blur creates organic grain clumps (no grid = no moiré)
+  and softens the image to the film's resolving power. Per-layer blur before
+  compositing preserves physical correctness: dye absorption is nonlinear, so
+  `blur(composite(A,B)) ≠ composite(blur(A), blur(B))`. The channel-parallel
+  trick (RGB channels = per-layer densities) achieves this with only 2 blur passes.
+- **Silver vs dye cloud via amplitude** — differentiation is purely via noise
+  amplitude (1.2× silver, 0.7× dye cloud). After blur, silver grain produces
+  high-contrast monochrome clumps; color grain produces luminance variation with
+  subtle color fringing at clump boundaries from uncorrelated per-layer noise.
 
 ## Known Limitations / Future Work
 

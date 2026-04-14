@@ -12,14 +12,8 @@ const DYE_CONTROLS = LAYER_CONTROLS.filter(([key]) =>
   key === 'dyePurity' || key === 'dmax'
 );
 const GRAIN_CONTROLS = [
-  ['crystalSize', 'Grain size', 'Crystal size', '', 0.05, 2, 0.01, 2],
+  ['grainIntensity', 'Grain intensity', 'Grain intensity', '', 0, 1, 0.01, 2],
 ];
-
-// ISO approximation from crystal size
-// Bigger crystals → faster film. crystalSize 0.05→ISO 25, 0.3→ISO 400, 0.9→ISO 1600, 2.0→ISO 6400
-function crystalToISO(cs) {
-  return Math.round(25 * Math.pow(cs / 0.05, 1.1));
-}
 
 /**
  * Sync all slider values in the current tab to match underlying layer/obj data.
@@ -154,8 +148,8 @@ function buildLayersTab(container, onInput, onRebuild) {
     });
     section.appendChild(details);
 
-    // Grain slider + ISO readout
-    buildGrainWithISO(section, layer, onLayerInput);
+    // Grain intensity slider
+    buildGroup(section, layer, GRAIN_CONTROLS, onLayerInput);
 
     container.appendChild(section);
   });
@@ -545,47 +539,6 @@ function buildSilverToggle(container, layer, onChange) {
 
   row.appendChild(label);
   row.appendChild(toggle);
-  container.appendChild(row);
-}
-
-// --- Grain slider with ISO readout ---
-function buildGrainWithISO(container, layer, onInput) {
-  const row = document.createElement('div');
-  row.className = 'param-row';
-
-  const labelRow = document.createElement('div');
-  labelRow.className = 'param-label';
-  const nameEl = document.createElement('span');
-  nameEl.className = 'param-name';
-  nameEl.textContent = 'Crystal size';
-  const valEl = document.createElement('span');
-  valEl.className = 'param-value';
-
-  function updateVal() {
-    const iso = crystalToISO(layer.crystalSize);
-    valEl.textContent = `${layer.crystalSize.toFixed(2)} (~ISO ${iso})`;
-  }
-  updateVal();
-
-  labelRow.appendChild(nameEl);
-  labelRow.appendChild(valEl);
-
-  const slider = document.createElement('input');
-  slider.type = 'range';
-  slider.min = 0.05; slider.max = 2; slider.step = 0.01;
-  slider.value = layer.crystalSize;
-  slider.dataset.key = 'crystalSize';
-  slider.dataset.decimals = '2';
-  slider.dataset.unit = '';
-
-  slider.addEventListener('input', () => {
-    layer.crystalSize = parseFloat(slider.value);
-    updateVal();
-    onInput();
-  });
-
-  row.appendChild(labelRow);
-  row.appendChild(slider);
   container.appendChild(row);
 }
 

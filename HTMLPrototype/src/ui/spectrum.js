@@ -143,26 +143,8 @@ function drawHdMini(ctx, layer, w, isBW) {
   ctx.restore();
 }
 
-function drawGrainDots(ctx, layer, w, isBW) {
-  const peak = layer.sensitizerPeak;
-  const bw = layer.sensitizerBw;
-  const cs = layer.crystalSize || 0.3;
-  const dotR = 0.5 + cs * 1.5;
-  const spacing = 3 + cs * 7;
-  const leftX = Math.max(0, wlToX(peak - bw, w));
-  const rightX = Math.min(w, wlToX(peak + bw, w));
-
-  ctx.save();
-  ctx.fillStyle = 'rgba(255,255,255,0.2)';
-  for (let x = leftX; x < rightX; x += spacing) {
-    const g = gauss(xToWl(x, w), peak, bw);
-    if (g < 0.1) continue;
-    const jx = x + Math.sin(x * 127.1) * spacing * 0.25;
-    ctx.beginPath();
-    ctx.arc(jx, CURVE_BOT - 3, dotR * g, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.restore();
+function drawGrainDots() {
+  // Removed: grain dots no longer meaningful with 1px=1grain model
 }
 
 function drawOverlapZones(ctx, layers, w, isBW) {
@@ -339,7 +321,6 @@ export function buildSpectrum(container, callbacks) {
     }
 
     for (let i = 0; i < layers.length; i++) {
-      drawGrainDots(ctx, layers[i], w, isBW);
       drawHdMini(ctx, layers[i], w, isBW);
     }
 
