@@ -299,6 +299,37 @@ void main() {
 }`;
 
 // ---------------------------------------------------------------------------
+// Pass 5-8 — Halation (optional): threshold → blur → blend
+// Extracts bright pixels, blurs with large radius, blends back with warm tint.
+// ---------------------------------------------------------------------------
+const THRESHOLD_FRAG_SRC = `
+precision highp float;
+varying vec2 vUV;
+uniform sampler2D uInput;
+uniform float uThreshold;
+void main() {
+  vec3 c = texture2D(uInput, vUV).rgb;
+  float lum = dot(c, vec3(0.299, 0.587, 0.114));
+  float mask = smoothstep(uThreshold, uThreshold + 0.15, lum);
+  gl_FragColor = vec4(c * mask, 1.0);
+}`;
+
+const HALATION_BLEND_FRAG_SRC = `
+precision highp float;
+varying vec2 vUV;
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uStrength;
+void main() {
+  vec3 scene = texture2D(uScene, vUV).rgb;
+  vec3 bloom = texture2D(uBloom, vUV).rgb;
+  // Warm tint — halation scatters through the red-sensitive anti-halation layer
+  vec3 tint = vec3(1.0, 0.55, 0.25);
+  vec3 out3 = scene + bloom * uStrength * tint;
+  gl_FragColor = vec4(min(out3, vec3(1.0)), 1.0);
+}`;
+
+// ---------------------------------------------------------------------------
 // CPU Gaussian blur — separable, operates on a single Float32Array
 // ---------------------------------------------------------------------------
 function cpuGaussianBlur(src, width, height, kernel) {
@@ -356,10 +387,12 @@ export class FilmRenderer {
     const gl = this.gl;
     const vs = this._compile(gl.VERTEX_SHADER, VERT_SRC);
 
-    // --- Three shader programs (all share the same vertex shader) ---
+    // --- Shader programs (all share the same vertex shader) ---
     this.densProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, DENSITY_FRAG_SRC));
     this.blurProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, BLUR_FRAG_SRC));
     this.compProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, COMPOSITE_FRAG_SRC));
+    this.threshProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, THRESHOLD_FRAG_SRC));
+    this.blendProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, HALATION_BLEND_FRAG_SRC));
     if (!this.densProg || !this.blurProg || !this.compProg) {
       this.gl = null;
       return;
@@ -413,6 +446,21 @@ export class FilmRenderer {
         this.compU.arrays[name].push(gl.getUniformLocation(this.compProg, `${name}[${i}]`));
       }
     }
+
+    // --- Halation program uniforms (threshold + blend) ---
+    if (this.threshProg) {
+      this.threshU = {
+        uInput: gl.getUniformLocation(this.threshProg, 'uInput'),
+        uThreshold: gl.getUniformLocation(this.threshProg, 'uThreshold'),
+      };
+    }
+    if (this.blendProg) {
+      this.blendU = {
+        uScene: gl.getUniformLocation(this.blendProg, 'uScene'),
+        uBloom: gl.getUniformLocation(this.blendProg, 'uBloom'),
+        uStrength: gl.getUniformLocation(this.blendProg, 'uStrength'),
+      };
+    }
   }
 
   _linkProgram(vs, fs) {
@@ -446,7 +494,7 @@ export class FilmRenderer {
   _ensureFBOs(w, h) {
     const gl = this.gl;
     if (!gl) return;
-    for (const fbo of [this.fboA, this.fboB]) {
+    for (const fbo of [this.fboA, this.fboB, this.fboC]) {
       if (fbo) { gl.deleteFramebuffer(fbo.fb); gl.deleteTexture(fbo.tex); }
     }
     const createFBO = () => {
@@ -465,6 +513,7 @@ export class FilmRenderer {
     };
     this.fboA = createFBO();
     this.fboB = createFBO();
+    this.fboC = createFBO();
   }
 
   _computeGaussianKernel(radius) {
@@ -542,16 +591,16 @@ export class FilmRenderer {
   destroy() {
     const gl = this.gl;
     if (!gl) return;
-    for (const fbo of [this.fboA, this.fboB]) {
+    for (const fbo of [this.fboA, this.fboB, this.fboC]) {
       if (fbo) { gl.deleteFramebuffer(fbo.fb); gl.deleteTexture(fbo.tex); }
     }
     if (this.texture) gl.deleteTexture(this.texture);
     if (this.noiseTex) gl.deleteTexture(this.noiseTex);
-    for (const prog of [this.densProg, this.blurProg, this.compProg]) {
+    for (const prog of [this.densProg, this.blurProg, this.compProg, this.threshProg, this.blendProg]) {
       if (prog) gl.deleteProgram(prog);
     }
     if (this.quadBuf) gl.deleteBuffer(this.quadBuf);
-    this.fboA = this.fboB = null;
+    this.fboA = this.fboB = this.fboC = null;
     this.gl = null;
   }
 
@@ -634,8 +683,11 @@ export class FilmRenderer {
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
-    // --- Pass 4: Composite — FBO A → screen ---
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // --- Pass 4: Composite — FBO A → screen (or FBO C if halation active) ---
+    const halationStr = g.halation ?? 0;
+    const doHalation = halationStr > 0.001 && this.fboC && this.threshProg && this.blendProg;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, doHalation ? this.fboC.fb : null);
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.compProg);
 
@@ -667,6 +719,56 @@ export class FilmRenderer {
     }
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // --- Pass 5-8: Halation (optional) ---
+    if (doHalation) {
+      const halRadius = 20; // fixed large-radius blur for halation glow
+      const halKernel = this._computeGaussianKernel(halRadius);
+
+      // Pass 5: Threshold — FBO C → FBO A (extract bright pixels)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboA.fb);
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(this.threshProg);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.fboC.tex);
+      gl.uniform1i(this.threshU.uInput, 0);
+      gl.uniform1f(this.threshU.uThreshold, 0.65);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Pass 6: H-blur bright mask — FBO A → FBO B
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboB.fb);
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(this.blurProg);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.fboA.tex);
+      gl.uniform1i(this.blurU.uInput, 0);
+      gl.uniform1f(this.blurU.uRadius, halRadius);
+      gl.uniform2f(this.blurU.uDirection, 1.0 / w, 0.0);
+      for (let i = 0; i < 16; i++) gl.uniform1f(this.blurU.uKernel[i], halKernel[i]);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Pass 7: V-blur bright mask — FBO B → FBO A
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboA.fb);
+      gl.viewport(0, 0, w, h);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.fboB.tex);
+      gl.uniform1i(this.blurU.uInput, 0);
+      gl.uniform2f(this.blurU.uDirection, 0.0, 1.0 / h);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Pass 8: Blend — FBO C (scene) + FBO A (bloom) → screen
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(this.blendProg);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.fboC.tex);
+      gl.uniform1i(this.blendU.uScene, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.fboA.tex);
+      gl.uniform1i(this.blendU.uBloom, 1);
+      gl.uniform1f(this.blendU.uStrength, halationStr);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -866,6 +968,50 @@ export class FilmRenderer {
       dst[idx+2] = Math.round(l2s(Math.max(0, Math.min(1, oB))) * 255);
       dst[idx+3] = 255;
     }
+
+    // --- CPU Halation ---
+    const halStr = g.halation ?? 0;
+    if (halStr > 0.001) {
+      const threshold = 0.65;
+      // Extract bright pixels into separate R/G/B arrays
+      const brightR = new Float32Array(width * height);
+      const brightG = new Float32Array(width * height);
+      const brightB = new Float32Array(width * height);
+      for (let i = 0; i < width * height; i++) {
+        const idx = i * 4;
+        const r = dst[idx] / 255, g2 = dst[idx+1] / 255, b = dst[idx+2] / 255;
+        const lum = 0.299 * r + 0.587 * g2 + 0.114 * b;
+        const mask = lum > threshold ? Math.min((lum - threshold) / 0.15, 1) : 0;
+        brightR[i] = r * mask;
+        brightG[i] = g2 * mask;
+        brightB[i] = b * mask;
+      }
+      // Blur bright channels with large radius
+      const halRadius = 20;
+      const hr = Math.ceil(halRadius);
+      const hSigma = Math.max(halRadius / 2.5, 0.001);
+      const hKernel = [];
+      let hTotal = 0;
+      for (let k = 0; k <= Math.min(hr, 15); k++) {
+        hKernel[k] = Math.exp(-k * k / (2 * hSigma * hSigma));
+        hTotal += k === 0 ? hKernel[k] : 2 * hKernel[k];
+      }
+      for (let k = 0; k < hKernel.length; k++) hKernel[k] /= hTotal;
+
+      const blurredR = cpuGaussianBlur(brightR, width, height, hKernel);
+      const blurredG = cpuGaussianBlur(brightG, width, height, hKernel);
+      const blurredB = cpuGaussianBlur(brightB, width, height, hKernel);
+
+      // Blend back with warm tint
+      const tintR = 1.0, tintG = 0.55, tintB = 0.25;
+      for (let i = 0; i < width * height; i++) {
+        const idx = i * 4;
+        dst[idx]   = Math.min(255, Math.round(dst[idx]   + blurredR[i] * halStr * tintR * 255));
+        dst[idx+1] = Math.min(255, Math.round(dst[idx+1] + blurredG[i] * halStr * tintG * 255));
+        dst[idx+2] = Math.min(255, Math.round(dst[idx+2] + blurredB[i] * halStr * tintB * 255));
+      }
+    }
+
     return out;
   }
 }
