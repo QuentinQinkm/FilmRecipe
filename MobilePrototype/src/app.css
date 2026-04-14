@@ -1,0 +1,34 @@
+:root {
+  --bg: #080808;
+  --surface: #111111;
+  --surface-raised: #1A1A1A;
+  --border: #222222;
+  --accent: #C8FF00;
+  --accent-dim: #C8FF0018;
+  --accent-muted: #C8FF0066;
+  --text: #E0E0E0;
+  --text-2: #777777;
+  --text-3: #444444;
+  --glass: #0A0A0ACC;
+  --radius: 2px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 430px;
+  margin: 0 auto;
+  overflow: hidden;
+}
