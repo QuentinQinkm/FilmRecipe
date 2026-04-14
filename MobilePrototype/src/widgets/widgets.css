@@ -96,3 +96,14 @@
 .rotary-knob__sub {
   font-size: 7px; color: var(--text-3); letter-spacing: 0.5px;
 }
+
+/* Gradient strip */
+.gradient-strip { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+.gradient-strip__header {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.gradient-strip__value { font-size: 11px; font-weight: 500; color: var(--text); }
+.gradient-strip__labels {
+  display: flex; justify-content: space-between;
+  font-size: 8px; font-weight: 500; letter-spacing: 1px; color: var(--text-3);
+}
