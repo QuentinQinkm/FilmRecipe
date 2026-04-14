@@ -654,7 +654,8 @@ export class FilmRenderer {
     gl.uniform1f(this.compU.uDir, g.dirInhibition);
     gl.uniform1f(this.compU.uMaskDen, g.maskDensity);
     gl.uniform1f(this.compU.uMaskHue, g.maskHue);
-    gl.uniform3f(this.compU.uBaseTint, g.baseTintR, g.baseTintG, g.baseTintB);
+    const tw = g.baseTintWarmth ?? 0;
+    gl.uniform3f(this.compU.uBaseTint, 1.0 + tw * 0.06, 1.0, 1.0 - tw * 0.12);
     gl.uniform1f(this.compU.uScanExp, g.scanExposure ?? 3.0);
 
     for (let i = 0; i < MAX_LAYERS; i++) {
@@ -678,6 +679,10 @@ export class FilmRenderer {
     const out = new ImageData(width, height);
     const dst = out.data;
     const { layers, global: g } = recipe;
+    const tw = g.baseTintWarmth ?? 0;
+    const baseTintR = 1.0 + tw * 0.06;
+    const baseTintG = 1.0;
+    const baseTintB = 1.0 - tw * 0.12;
     const numLayers = layers.length;
     const isBW = layers.every(l => l.dyePurity < 0.01);
     const isPos = !isBW && (g.reversal || 0) > 0.5;
@@ -812,9 +817,9 @@ export class FilmRenderer {
         // Subtract fog floor for scan path — maps [fog, dmax] → [0, 1]
         let lum = rawMode ? 1 - den / dm0 : Math.max(den - fog0, 0) / Math.max(dm0 - fog0, 0.01);
         lum = Math.max(0, Math.min(1, lum));
-        oR = lum * g.baseTintR;
-        oG = lum * g.baseTintG;
-        oB = lum * g.baseTintB;
+        oR = lum * baseTintR;
+        oG = lum * baseTintG;
+        oB = lum * baseTintB;
       } else {
         const dens = [];
         for (let j = 0; j < numLayers; j++) {
@@ -854,7 +859,7 @@ export class FilmRenderer {
           oG = Math.exp(-totG * LN10);
           oB = Math.exp(-totB * LN10);
         }
-        oR *= g.baseTintR; oG *= g.baseTintG; oB *= g.baseTintB;
+        oR *= baseTintR; oG *= baseTintG; oB *= baseTintB;
       }
       dst[idx]   = Math.round(l2s(Math.max(0, Math.min(1, oR))) * 255);
       dst[idx+1] = Math.round(l2s(Math.max(0, Math.min(1, oG))) * 255);
