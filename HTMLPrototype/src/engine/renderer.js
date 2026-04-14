@@ -2,19 +2,44 @@ const VERT_SRC = `
 attribute vec2 aPos;
 varying vec2 vUV;
 void main() {
-  vUV = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+  vUV = vec2(aPos.x * 0.5 + 0.5, aPos.y * 0.5 + 0.5);
   gl_Position = vec4(aPos, 0.0, 1.0);
 }`;
 
-const MAX_LAYERS = 5;
+const MAX_LAYERS = 4;
+const GRAIN_PX = 3;     // crystalSize * GRAIN_PX = blur radius in pixels
+const GRAIN_CHROMA = 0.25; // fraction of grain that's per-layer (color); rest is shared (luminance)
 
-const FRAG_SRC = `
+// ---------------------------------------------------------------------------
+// Shared GLSL snippets (included in both density and composite shaders)
+// ---------------------------------------------------------------------------
+const GLSL_LN10 = `const float LN10 = 2.302585;`;
+
+const GLSL_DYE_ABS = `
+vec3 dyeAbs(float hue, float pur) {
+  float ah = mod(hue + 180.0, 360.0) / 60.0;
+  float x = 1.0 - abs(mod(ah, 2.0) - 1.0);
+  vec3 c;
+  if      (ah < 1.0) c = vec3(1.0, x,   0.0);
+  else if (ah < 2.0) c = vec3(x,   1.0, 0.0);
+  else if (ah < 3.0) c = vec3(0.0, 1.0, x  );
+  else if (ah < 4.0) c = vec3(0.0, x,   1.0);
+  else if (ah < 5.0) c = vec3(x,   0.0, 1.0);
+  else               c = vec3(1.0, 0.0, x  );
+  return c * pur;
+}`;
+
+// ---------------------------------------------------------------------------
+// Pass 1 — Density shader
+// Computes per-layer density with grain noise, outputs as RGB channels.
+// R = layer 0, G = layer 1, B = layer 2, A = layer 3 (or 1.0 if < 4 layers).
+// Densities are scaled by /4.0 to fit UNSIGNED_BYTE FBO (range 0–4.0 → 0–1.0).
+// ---------------------------------------------------------------------------
+const DENSITY_FRAG_SRC = `
 precision highp float;
 varying vec2 vUV;
 uniform sampler2D uImg;
 uniform sampler2D uNoise;
-uniform float uReversal;
-uniform float uRaw;
 uniform int uLayerCount;
 uniform float uSensPeak[${MAX_LAYERS}];
 uniform float uSensBw[${MAX_LAYERS}];
@@ -26,20 +51,15 @@ uniform float uFog[${MAX_LAYERS}];
 uniform float uDyeHue[${MAX_LAYERS}];
 uniform float uDyePurity[${MAX_LAYERS}];
 uniform float uCrystal[${MAX_LAYERS}];
-uniform float uDir, uMaskDen, uMaskHue;
-uniform vec3 uBaseTint;
-uniform float uPassthrough;
 uniform float uStackStr;
 uniform vec2 uImgDim;
 
 const vec3 CH = vec3(625.0, 540.0, 450.0);
-const float LN10 = 2.302585;
+${GLSL_LN10}
+${GLSL_DYE_ABS}
 
 float s2l(float c) {
   return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-}
-float l2s(float c) {
-  return c <= 0.0031308 ? 12.92 * c : 1.055 * pow(max(c, 0.0), 1.0/2.4) - 0.055;
 }
 
 float sens(float ch, float pk, float bw) {
@@ -67,22 +87,6 @@ float hd(float ex, float toe, float gam, float sho, float dm) {
   return clamp(den, 0.0, dm);
 }
 
-vec3 dyeAbs(float hue, float pur) {
-  float ah = mod(hue + 180.0, 360.0) / 60.0;
-  float x = 1.0 - abs(mod(ah, 2.0) - 1.0);
-  vec3 c;
-  if      (ah < 1.0) c = vec3(1.0, x,   0.0);
-  else if (ah < 2.0) c = vec3(x,   1.0, 0.0);
-  else if (ah < 3.0) c = vec3(0.0, 1.0, x  );
-  else if (ah < 4.0) c = vec3(0.0, x,   1.0);
-  else if (ah < 5.0) c = vec3(x,   0.0, 1.0);
-  else               c = vec3(1.0, 0.0, x  );
-  return c * pur;
-}
-
-// Read per-layer noise from RGBA channels of noise texture
-// Each channel is an independent random value in [0, 1]
-// Converted to [-1, 1] for grain
 float layerNoise(int layer) {
   vec4 n = texture2D(uNoise, gl_FragCoord.xy / uImgDim);
   if (layer == 0) return n.r * 2.0 - 1.0;
@@ -93,7 +97,6 @@ float layerNoise(int layer) {
 
 void main() {
   vec4 tx = texture2D(uImg, vUV);
-  if (uPassthrough > 0.5) { gl_FragColor = tx; return; }
   vec3 lin = vec3(s2l(tx.r), s2l(tx.g), s2l(tx.b));
 
   int nLayers = uLayerCount;
@@ -102,9 +105,9 @@ void main() {
     if (i >= nLayers) break;
     if (uDyePurity[i] >= 0.01) { isBW = false; break; }
   }
-  bool isPos = !isBW && uReversal > 0.5;
-  bool isNeg = !isBW && uReversal < 0.5;
-  vec3 out3;
+
+  float dens[${MAX_LAYERS}];
+  for (int i = 0; i < ${MAX_LAYERS}; i++) dens[i] = 0.0;
 
   if (isBW) {
     vec3 w = vec3(sens(CH.x, uSensPeak[0], uSensBw[0]),
@@ -113,23 +116,15 @@ void main() {
     float exposure = dot(lin, w) / max(dot(w, vec3(1.0)), 0.001);
     float dm0 = uDmax[0];
     float den = uFog[0] + hd(exposure, uToe[0], uGamma[0], uShoulder[0], dm0);
-    den = clamp(den, 0.0, dm0);
 
-    // Per-pixel noise texture, binomial amplitude from crystal count
     float noise = layerNoise(0);
     float cs = uCrystal[0];
     float N = 1.0 / (cs * cs + 0.01);
     float p = clamp(den / max(dm0, 0.01), 0.0, 1.0);
     float sigma = sqrt(p * (1.0 - p) / max(N, 0.1));
-    den = clamp(den + noise * sigma * dm0 * 1.2, 0.0, dm0);
-
-    float lum = uRaw > 0.5 ? 1.0 - den / dm0 : den / dm0;
-    lum = clamp(lum, 0.0, 1.0);
-    out3 = vec3(lum) * uBaseTint;
+    dens[0] = clamp(den + noise * sigma * dm0 * 1.2, 0.0, dm0);
   } else {
-    float dn[${MAX_LAYERS}];
     vec3 avail = lin;
-
     for (int i = 0; i < ${MAX_LAYERS}; i++) {
       if (i >= nLayers) break;
       vec3 w = vec3(sens(CH.x, uSensPeak[i], uSensBw[i]),
@@ -138,7 +133,6 @@ void main() {
       float e = dot(avail, w) / max(dot(w, vec3(1.0)), 0.001);
       float d = uFog[i] + hd(e, uToe[i], uGamma[i], uShoulder[i], uDmax[i]);
 
-      // Per-pixel noise texture, binomial amplitude from crystal count
       float noise = layerNoise(i);
       float cs = uCrystal[i];
       float N = 1.0 / (cs * cs + 0.01);
@@ -146,16 +140,110 @@ void main() {
       float sigma = sqrt(pr * (1.0 - pr) / max(N, 0.1));
       float amplitude = uDyePurity[i] < 0.01 ? 1.2 : 0.7;
       d = clamp(d + noise * sigma * uDmax[i] * amplitude, 0.0, uDmax[i]);
-      dn[i] = d;
+      dens[i] = d;
 
-      // Stacking attenuation
       if (uStackStr > 0.0) {
         vec3 sa = dyeAbs(uDyeHue[i], uDyePurity[i]) * d;
         avail *= mix(vec3(1.0), exp(-sa * LN10), uStackStr);
       }
     }
+  }
 
-    // Apply reversal
+  gl_FragColor = vec4(dens[0] / 4.0, dens[1] / 4.0, dens[2] / 4.0,
+                      nLayers > 3 ? dens[3] / 4.0 : 1.0);
+}`;
+
+// ---------------------------------------------------------------------------
+// Pass 2 & 3 — Separable Gaussian blur
+// Operates on all RGBA channels independently = per-layer blur.
+// ---------------------------------------------------------------------------
+const BLUR_FRAG_SRC = `
+precision highp float;
+varying vec2 vUV;
+uniform sampler2D uInput;
+uniform vec2 uDirection;
+uniform float uRadius;
+uniform float uKernel[16];
+
+void main() {
+  vec4 sum = texture2D(uInput, vUV) * uKernel[0];
+  for (int i = 1; i < 16; i++) {
+    if (float(i) > uRadius) break;
+    vec2 off = uDirection * float(i);
+    sum += texture2D(uInput, vUV + off) * uKernel[i];
+    sum += texture2D(uInput, vUV - off) * uKernel[i];
+  }
+  gl_FragColor = sum;
+}`;
+
+// ---------------------------------------------------------------------------
+// Pass 4 — Compositing shader
+// Reads blurred per-layer densities, applies DIR, dye absorption, reversal,
+// mask, tint → final sRGB output.
+// ---------------------------------------------------------------------------
+const COMPOSITE_FRAG_SRC = `
+precision highp float;
+varying vec2 vUV;
+uniform sampler2D uDensities;
+uniform sampler2D uImg;
+uniform float uPassthrough;
+uniform float uReversal;
+uniform float uRaw;
+uniform int uLayerCount;
+uniform float uDyeHue[${MAX_LAYERS}];
+uniform float uDyePurity[${MAX_LAYERS}];
+uniform float uDmax[${MAX_LAYERS}];
+uniform float uFog[${MAX_LAYERS}];
+uniform float uDir;
+uniform float uMaskDen, uMaskHue;
+uniform vec3 uBaseTint;
+
+${GLSL_LN10}
+${GLSL_DYE_ABS}
+
+float l2s(float c) {
+  return c <= 0.0031308 ? 12.92 * c : 1.055 * pow(max(c, 0.0), 1.0/2.4) - 0.055;
+}
+
+void main() {
+  if (uPassthrough > 0.5) {
+    gl_FragColor = texture2D(uImg, vUV);
+    return;
+  }
+
+  vec4 dt = texture2D(uDensities, vUV);
+  int nLayers = uLayerCount;
+
+  bool isBW = true;
+  for (int i = 0; i < ${MAX_LAYERS}; i++) {
+    if (i >= nLayers) break;
+    if (uDyePurity[i] >= 0.01) { isBW = false; break; }
+  }
+  bool isPos = !isBW && uReversal > 0.5;
+  bool isNeg = !isBW && uReversal < 0.5;
+
+  vec3 out3;
+
+  if (isBW) {
+    float den = dt.r * 4.0;
+    float dm0 = uDmax[0];
+    float fog0 = uFog[0];
+    float lum;
+    if (uRaw > 0.5) {
+      lum = 1.0 - den / dm0;
+    } else {
+      // Subtract fog floor — maps [fog, dmax] → [0, 1]
+      lum = max(den - fog0, 0.0) / max(dm0 - fog0, 0.01);
+    }
+    lum = clamp(lum, 0.0, 1.0);
+    out3 = vec3(lum) * uBaseTint;
+  } else {
+    float dn[${MAX_LAYERS}];
+    dn[0] = dt.r * 4.0;
+    dn[1] = dt.g * 4.0;
+    dn[2] = dt.b * 4.0;
+    dn[3] = nLayers > 3 ? dt.a * 4.0 : 0.0;
+
     if (isPos) {
       for (int i = 0; i < ${MAX_LAYERS}; i++) {
         if (i >= nLayers) break;
@@ -163,7 +251,6 @@ void main() {
       }
     }
 
-    // DIR inhibition
     float totalDenSum = 0.0;
     for (int i = 0; i < ${MAX_LAYERS}; i++) {
       if (i >= nLayers) break;
@@ -176,7 +263,6 @@ void main() {
       d[i] = max(0.0, dn[i] - uDir * inh * 0.15);
     }
 
-    // Total optical density
     vec3 totalOD = vec3(0.0);
     for (int i = 0; i < ${MAX_LAYERS}; i++) {
       if (i >= nLayers) break;
@@ -185,8 +271,17 @@ void main() {
     }
 
     if (isNeg && uRaw < 0.5) {
+      // Subtract fog-only OD floor — simulates scanner calibrating against
+      // unexposed film base, so fog-only areas render as true black.
+      vec3 fogOD = vec3(0.0);
+      for (int i = 0; i < ${MAX_LAYERS}; i++) {
+        if (i >= nLayers) break;
+        vec3 da = dyeAbs(uDyeHue[i], uDyePurity[i]);
+        fogOD += da * uFog[i];
+      }
       float scanExp = 3.0;
-      out3 = vec3(1.0) - exp(-totalOD * scanExp);
+      vec3 imageOD = max(totalOD - fogOD, vec3(0.0));
+      out3 = vec3(1.0) - exp(-imageOD * scanExp);
     } else if (isNeg) {
       float mh = clamp(uMaskHue / 60.0, 0.0, 1.0);
       vec3 maskOD = vec3(uMaskDen * mix(0.65, 0.45, mh),
@@ -203,13 +298,53 @@ void main() {
   gl_FragColor = vec4(l2s(out3.r), l2s(out3.g), l2s(out3.b), 1.0);
 }`;
 
+// ---------------------------------------------------------------------------
+// CPU Gaussian blur — separable, operates on a single Float32Array
+// ---------------------------------------------------------------------------
+function cpuGaussianBlur(src, width, height, kernel) {
+  const r = kernel.length - 1;
+  const temp = new Float32Array(width * height);
+  // Horizontal pass
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      let sum = src[row + x] * kernel[0];
+      for (let k = 1; k <= r; k++) {
+        const left = Math.max(0, x - k);
+        const right = Math.min(width - 1, x + k);
+        sum += (src[row + left] + src[row + right]) * kernel[k];
+      }
+      temp[row + x] = sum;
+    }
+  }
+  // Vertical pass
+  const out = new Float32Array(width * height);
+  for (let x = 0; x < width; x++) {
+    for (let y = 0; y < height; y++) {
+      let sum = temp[y * width + x] * kernel[0];
+      for (let k = 1; k <= r; k++) {
+        const top = Math.max(0, y - k) * width + x;
+        const bot = Math.min(height - 1, y + k) * width + x;
+        sum += (temp[top] + temp[bot]) * kernel[k];
+      }
+      out[y * width + x] = sum;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// FilmRenderer
+// ---------------------------------------------------------------------------
 export class FilmRenderer {
-  constructor(canvas) {
+  constructor(canvas, { cpuOnly = false } = {}) {
     this.canvas = canvas;
-    this.gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: false });
+    this.gl = cpuOnly ? null : canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: false });
     this.hasImage = false;
     this.imageWidth = 0;
     this.imageHeight = 0;
+    this.fboA = null;
+    this.fboB = null;
     if (this.gl) {
       this._initGL();
     }
@@ -220,44 +355,78 @@ export class FilmRenderer {
   _initGL() {
     const gl = this.gl;
     const vs = this._compile(gl.VERTEX_SHADER, VERT_SRC);
-    const fs = this._compile(gl.FRAGMENT_SHADER, FRAG_SRC);
-    const prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      console.error('Link error:', gl.getProgramInfoLog(prog));
+
+    // --- Three shader programs (all share the same vertex shader) ---
+    this.densProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, DENSITY_FRAG_SRC));
+    this.blurProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, BLUR_FRAG_SRC));
+    this.compProg = this._linkProgram(vs, this._compile(gl.FRAGMENT_SHADER, COMPOSITE_FRAG_SRC));
+    if (!this.densProg || !this.blurProg || !this.compProg) {
       this.gl = null;
       return;
     }
-    this.prog = prog;
-    gl.useProgram(prog);
 
+    // Fullscreen quad — shared by all programs, attribute 0 = aPos
     const quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    this.quadBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
     gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
-    const aPos = gl.getAttribLocation(prog, 'aPos');
-    gl.enableVertexAttribArray(aPos);
-    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
+    // Textures
     this.texture = gl.createTexture();
-
-    // Noise texture: image-sized RGBA, generated once in setImage()
-    // Grain is static — crystal positions don't change when you adjust sliders
     this.noiseTex = gl.createTexture();
 
-    this.u = {};
-    for (const n of ['uImg','uNoise','uReversal','uRaw','uDir','uMaskDen','uMaskHue','uBaseTint','uPassthrough','uStackStr','uLayerCount','uImgDim']) {
-      this.u[n] = gl.getUniformLocation(prog, n);
+    // --- Density program uniforms ---
+    this.densU = {};
+    for (const n of ['uImg','uNoise','uLayerCount','uStackStr','uImgDim']) {
+      this.densU[n] = gl.getUniformLocation(this.densProg, n);
     }
-    this.uArrays = {};
+    this.densU.arrays = {};
     for (const name of ['uSensPeak','uSensBw','uToe','uGamma','uShoulder','uDmax','uFog','uDyeHue','uDyePurity','uCrystal']) {
-      this.uArrays[name] = [];
+      this.densU.arrays[name] = [];
       for (let i = 0; i < MAX_LAYERS; i++) {
-        this.uArrays[name].push(gl.getUniformLocation(prog, `${name}[${i}]`));
+        this.densU.arrays[name].push(gl.getUniformLocation(this.densProg, `${name}[${i}]`));
       }
     }
+
+    // --- Blur program uniforms ---
+    this.blurU = {
+      uInput: gl.getUniformLocation(this.blurProg, 'uInput'),
+      uDirection: gl.getUniformLocation(this.blurProg, 'uDirection'),
+      uRadius: gl.getUniformLocation(this.blurProg, 'uRadius'),
+      uKernel: []
+    };
+    for (let i = 0; i < 16; i++) {
+      this.blurU.uKernel.push(gl.getUniformLocation(this.blurProg, `uKernel[${i}]`));
+    }
+
+    // --- Compositing program uniforms ---
+    this.compU = {};
+    for (const n of ['uDensities','uImg','uPassthrough','uReversal','uRaw','uLayerCount','uDir','uMaskDen','uMaskHue','uBaseTint']) {
+      this.compU[n] = gl.getUniformLocation(this.compProg, n);
+    }
+    this.compU.arrays = {};
+    for (const name of ['uDyeHue','uDyePurity','uDmax','uFog']) {
+      this.compU.arrays[name] = [];
+      for (let i = 0; i < MAX_LAYERS; i++) {
+        this.compU.arrays[name].push(gl.getUniformLocation(this.compProg, `${name}[${i}]`));
+      }
+    }
+  }
+
+  _linkProgram(vs, fs) {
+    const gl = this.gl;
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.bindAttribLocation(prog, 0, 'aPos');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error('Link error:', gl.getProgramInfoLog(prog));
+      return null;
+    }
+    return prog;
   }
 
   _compile(type, src) {
@@ -271,10 +440,53 @@ export class FilmRenderer {
     return s;
   }
 
+  _ensureFBOs(w, h) {
+    const gl = this.gl;
+    if (!gl) return;
+    for (const fbo of [this.fboA, this.fboB]) {
+      if (fbo) { gl.deleteFramebuffer(fbo.fb); gl.deleteTexture(fbo.tex); }
+    }
+    const createFBO = () => {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return { fb, tex };
+    };
+    this.fboA = createFBO();
+    this.fboB = createFBO();
+  }
+
+  _computeGaussianKernel(radius) {
+    const r = Math.ceil(radius);
+    const sigma = Math.max(radius / 2.5, 0.001);
+    const kernel = new Float32Array(16);
+    let total = 0;
+    for (let i = 0; i <= Math.min(r, 15); i++) {
+      kernel[i] = Math.exp(-i * i / (2 * sigma * sigma));
+      total += i === 0 ? kernel[i] : 2 * kernel[i];
+    }
+    for (let i = 0; i <= Math.min(r, 15); i++) kernel[i] /= total;
+    return kernel;
+  }
+
   _generateNoise(w, h) {
     const d = new Uint8Array(w * h * 4);
-    for (let i = 0; i < d.length; i++) {
-      d[i] = (Math.random() * 256) | 0;
+    // Correlated noise: shared luminance base + small per-layer chroma variation
+    // Real film grain is primarily luminance with subtle color shifts
+    for (let i = 0; i < w * h; i++) {
+      const base = Math.random() * 256;
+      const off = i * 4;
+      for (let c = 0; c < 4; c++) {
+        d[off + c] = ((1 - GRAIN_CHROMA) * base + GRAIN_CHROMA * Math.random() * 256) | 0;
+      }
     }
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.noiseTex);
@@ -291,14 +503,14 @@ export class FilmRenderer {
     if (this.gl) {
       const gl = this.gl;
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      // Generate static noise texture once per image — grain pattern is fixed
       this._generateNoise(w, h);
+      this._ensureFBOs(w, h);
     }
     this._sourceCanvas = (source instanceof HTMLCanvasElement) ? source : null;
     if (this._sourceCanvas) {
@@ -324,57 +536,137 @@ export class FilmRenderer {
     }
   }
 
+  destroy() {
+    const gl = this.gl;
+    if (!gl) return;
+    for (const fbo of [this.fboA, this.fboB]) {
+      if (fbo) { gl.deleteFramebuffer(fbo.fb); gl.deleteTexture(fbo.tex); }
+    }
+    if (this.texture) gl.deleteTexture(this.texture);
+    if (this.noiseTex) gl.deleteTexture(this.noiseTex);
+    for (const prog of [this.densProg, this.blurProg, this.compProg]) {
+      if (prog) gl.deleteProgram(prog);
+    }
+    if (this.quadBuf) gl.deleteBuffer(this.quadBuf);
+    this.fboA = this.fboB = null;
+    this.gl = null;
+  }
+
+  // -------------------------------------------------------------------------
+  // 4-pass GPU pipeline
+  // Pass 1: density+grain → FBO A
+  // Pass 2: H blur FBO A → FBO B
+  // Pass 3: V blur FBO B → FBO A
+  // Pass 4: composite FBO A → screen
+  // -------------------------------------------------------------------------
   _renderGL(recipe, rawMode) {
     const gl = this.gl;
     const { canvas } = this;
     canvas.width = this.imageWidth;
     canvas.height = this.imageHeight;
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.useProgram(this.prog);
-
-    // Bind image texture to unit 0
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.uniform1i(this.u.uImg, 0);
-
-    // Bind noise texture to unit 1
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.noiseTex);
-    gl.uniform1i(this.u.uNoise, 1);
-
+    const w = canvas.width, h = canvas.height;
     const L = recipe.layers;
     const n = Math.min(L.length, MAX_LAYERS);
+    const g = recipe.global;
 
-    gl.uniform1f(this.u.uPassthrough, 0);
-    gl.uniform1f(this.u.uReversal, recipe.global.reversal || 0);
-    gl.uniform1f(this.u.uRaw, rawMode ? 1 : 0);
-    gl.uniform1i(this.u.uLayerCount, n);
-    gl.uniform2f(this.u.uImgDim, canvas.width, canvas.height);
+    const maxCS = Math.max(...L.map(l => l.crystalSize || 0.3));
+    const blurRadius = Math.max(Math.min(maxCS * GRAIN_PX, 15), 0.5);
+    const needsBlur = this.fboA && this.fboB;
+
+    // --- Pass 1: Density shader → FBO A ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboA.fb);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(this.densProg);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.uniform1i(this.densU.uImg, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.noiseTex);
+    gl.uniform1i(this.densU.uNoise, 1);
+
+    gl.uniform1i(this.densU.uLayerCount, n);
+    gl.uniform2f(this.densU.uImgDim, w, h);
+    gl.uniform1f(this.densU.uStackStr, g.stackingStrength || 0);
 
     for (let i = 0; i < MAX_LAYERS; i++) {
       const layer = i < n ? L[i] : {};
-      gl.uniform1f(this.uArrays.uSensPeak[i], layer.sensitizerPeak ?? 550);
-      gl.uniform1f(this.uArrays.uSensBw[i], layer.sensitizerBw ?? 100);
-      gl.uniform1f(this.uArrays.uToe[i], layer.hdToe ?? 0.2);
-      gl.uniform1f(this.uArrays.uGamma[i], layer.hdGamma ?? 0.7);
-      gl.uniform1f(this.uArrays.uShoulder[i], layer.hdShoulder ?? 0.15);
-      gl.uniform1f(this.uArrays.uDmax[i], layer.dmax ?? 2.0);
-      gl.uniform1f(this.uArrays.uFog[i], layer.fog ?? 0);
-      gl.uniform1f(this.uArrays.uDyeHue[i], layer.dyeHue ?? 0);
-      gl.uniform1f(this.uArrays.uDyePurity[i], layer.dyePurity ?? 0);
-      gl.uniform1f(this.uArrays.uCrystal[i], layer.crystalSize ?? 0.3);
+      const a = this.densU.arrays;
+      gl.uniform1f(a.uSensPeak[i], layer.sensitizerPeak ?? 550);
+      gl.uniform1f(a.uSensBw[i], layer.sensitizerBw ?? 100);
+      gl.uniform1f(a.uToe[i], layer.hdToe ?? 0.2);
+      gl.uniform1f(a.uGamma[i], layer.hdGamma ?? 0.7);
+      gl.uniform1f(a.uShoulder[i], layer.hdShoulder ?? 0.15);
+      gl.uniform1f(a.uDmax[i], layer.dmax ?? 2.0);
+      gl.uniform1f(a.uFog[i], layer.fog ?? 0);
+      gl.uniform1f(a.uDyeHue[i], layer.dyeHue ?? 0);
+      gl.uniform1f(a.uDyePurity[i], layer.dyePurity ?? 0);
+      gl.uniform1f(a.uCrystal[i], layer.crystalSize ?? 0.3);
     }
 
-    const g = recipe.global;
-    gl.uniform1f(this.u.uDir, g.dirInhibition);
-    gl.uniform1f(this.u.uMaskDen, g.maskDensity);
-    gl.uniform1f(this.u.uMaskHue, g.maskHue);
-    gl.uniform3f(this.u.uBaseTint, g.baseTintR, g.baseTintG, g.baseTintB);
-    gl.uniform1f(this.u.uStackStr, g.stackingStrength || 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // --- Pass 2 & 3: Separable Gaussian blur ---
+    if (needsBlur) {
+      const kernel = this._computeGaussianKernel(blurRadius);
+      gl.useProgram(this.blurProg);
+
+      // Pass 2: H blur — FBO A → FBO B
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboB.fb);
+      gl.viewport(0, 0, w, h);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.fboA.tex);
+      gl.uniform1i(this.blurU.uInput, 0);
+      gl.uniform2f(this.blurU.uDirection, 1.0 / w, 0.0);
+      gl.uniform1f(this.blurU.uRadius, blurRadius);
+      for (let i = 0; i < 16; i++) gl.uniform1f(this.blurU.uKernel[i], kernel[i]);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Pass 3: V blur — FBO B → FBO A
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboA.fb);
+      gl.viewport(0, 0, w, h);
+      gl.bindTexture(gl.TEXTURE_2D, this.fboB.tex);
+      gl.uniform2f(this.blurU.uDirection, 0.0, 1.0 / h);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    // --- Pass 4: Composite — FBO A → screen ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(this.compProg);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.fboA.tex);
+    gl.uniform1i(this.compU.uDensities, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.uniform1i(this.compU.uImg, 1);
+
+    gl.uniform1f(this.compU.uPassthrough, 0);
+    gl.uniform1f(this.compU.uReversal, g.reversal || 0);
+    gl.uniform1f(this.compU.uRaw, rawMode ? 1 : 0);
+    gl.uniform1i(this.compU.uLayerCount, n);
+    gl.uniform1f(this.compU.uDir, g.dirInhibition);
+    gl.uniform1f(this.compU.uMaskDen, g.maskDensity);
+    gl.uniform1f(this.compU.uMaskHue, g.maskHue);
+    gl.uniform3f(this.compU.uBaseTint, g.baseTintR, g.baseTintG, g.baseTintB);
+
+    for (let i = 0; i < MAX_LAYERS; i++) {
+      const layer = i < n ? L[i] : {};
+      gl.uniform1f(this.compU.arrays.uDyeHue[i], layer.dyeHue ?? 0);
+      gl.uniform1f(this.compU.arrays.uDyePurity[i], layer.dyePurity ?? 0);
+      gl.uniform1f(this.compU.arrays.uDmax[i], layer.dmax ?? 2.0);
+      gl.uniform1f(this.compU.arrays.uFog[i], layer.fog ?? 0);
+    }
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
+  // -------------------------------------------------------------------------
+  // CPU fallback — two-pass: density+grain → per-layer blur → composite
+  // -------------------------------------------------------------------------
   _renderCPU(recipe, rawMode) {
     const src = this._cpuSource;
     if (!src) return null;
@@ -382,10 +674,12 @@ export class FilmRenderer {
     const out = new ImageData(width, height);
     const dst = out.data;
     const { layers, global: g } = recipe;
+    const numLayers = layers.length;
     const isBW = layers.every(l => l.dyePurity < 0.01);
     const isPos = !isBW && (g.reversal || 0) > 0.5;
     const isNeg = !isBW && !isPos;
     const CH = [625, 540, 450];
+    const LN10 = 2.302585;
 
     function s2l(c) { return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
     function l2s(c) { return c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(Math.max(c, 0), 1/2.4) - 0.055; }
@@ -414,23 +708,25 @@ export class FilmRenderer {
       return [r * pur, g * pur, b * pur];
     }
 
-    const LN10 = 2.302585;
-
-    // Pre-generate per-layer noise arrays using Math.random()
+    // Pre-generate per-layer noise (correlated: shared luminance + per-layer chroma)
+    const baseNoise = new Float32Array(width * height);
+    for (let i = 0; i < baseNoise.length; i++) baseNoise[i] = Math.random() * 2 - 1;
     const layerNoise = layers.map(() => {
       const arr = new Float32Array(width * height);
       for (let i = 0; i < arr.length; i++) {
-        arr[i] = Math.random() * 2 - 1;
+        arr[i] = (1 - GRAIN_CHROMA) * baseNoise[i] + GRAIN_CHROMA * (Math.random() * 2 - 1);
       }
       return arr;
     });
+
+    // --- Pass 1: Compute per-layer densities with grain ---
+    const layerDensities = layers.map(() => new Float32Array(width * height));
 
     for (let i = 0; i < width * height; i++) {
       const idx = i * 4;
       const sr = s2l(data[idx] / 255);
       const sg = s2l(data[idx+1] / 255);
       const sb = s2l(data[idx+2] / 255);
-      let oR, oG, oB;
 
       if (isBW) {
         const L = layers[0];
@@ -441,26 +737,17 @@ export class FilmRenderer {
         const exp = (sr * wR + sg * wG + sb * wB) / wS;
         const dm0 = L.dmax || 2.0;
         let den = (L.fog || 0) + hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, dm0);
-        den = Math.max(0, Math.min(dm0, den));
 
-        // Per-pixel noise, binomial amplitude from crystal count
         const noise = layerNoise[0][i];
         const cs = L.crystalSize ?? 0.3;
         const N = 1 / (cs * cs + 0.01);
         const p = Math.max(0, Math.min(1, den / Math.max(dm0, 0.01)));
         const sigma = Math.sqrt(p * (1 - p) / Math.max(N, 0.1));
-        den = Math.max(0, Math.min(dm0, den + noise * sigma * dm0 * 1.2));
-
-        let lum = rawMode ? 1 - den / dm0 : den / dm0;
-        lum = Math.max(0, Math.min(1, lum));
-        oR = lum * g.baseTintR;
-        oG = lum * g.baseTintG;
-        oB = lum * g.baseTintB;
+        layerDensities[0][i] = Math.max(0, Math.min(dm0, den + noise * sigma * dm0 * 1.2));
       } else {
         const stackStr = g.stackingStrength || 0;
         let availR = sr, availG = sg, availB = sb;
-        const dens = [];
-        for (let j = 0; j < layers.length; j++) {
+        for (let j = 0; j < numLayers; j++) {
           const L = layers[j];
           const wR = sens(CH[0], L.sensitizerPeak, L.sensitizerBw);
           const wG = sens(CH[1], L.sensitizerPeak, L.sensitizerBw);
@@ -468,9 +755,7 @@ export class FilmRenderer {
           const wS = wR + wG + wB || 1;
           const exp = (availR * wR + availG * wG + availB * wB) / wS;
           let d = (L.fog || 0) + hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, L.dmax);
-          d = Math.max(0, Math.min(L.dmax, d));
 
-          // Per-pixel noise, binomial amplitude from crystal count
           const noise = layerNoise[j][i];
           const cs = L.crystalSize ?? 0.3;
           const N = 1 / (cs * cs + 0.01);
@@ -478,30 +763,80 @@ export class FilmRenderer {
           const sigma = Math.sqrt(p * (1 - p) / Math.max(N, 0.1));
           const amplitude = L.dyePurity < 0.01 ? 1.2 : 0.7;
           d = Math.max(0, Math.min(L.dmax, d + noise * sigma * L.dmax * amplitude));
+          layerDensities[j][i] = d;
 
           if (stackStr > 0) {
             const [aR, aG, aB] = dyeA(L.dyeHue, L.dyePurity);
-            const mix = (base, att) => base * (1 - stackStr) + att * stackStr;
-            availR = mix(availR, availR * Math.exp(-aR * d * LN10));
-            availG = mix(availG, availG * Math.exp(-aG * d * LN10));
-            availB = mix(availB, availB * Math.exp(-aB * d * LN10));
+            availR *= (1 - stackStr) + stackStr * Math.exp(-aR * d * LN10);
+            availG *= (1 - stackStr) + stackStr * Math.exp(-aG * d * LN10);
+            availB *= (1 - stackStr) + stackStr * Math.exp(-aB * d * LN10);
           }
-          dens.push(isPos ? L.dmax - d : d);
+        }
+      }
+    }
+
+    // --- Per-layer Gaussian blur ---
+    const maxCS = Math.max(...layers.map(l => l.crystalSize || 0.3));
+    const blurRadius = Math.max(Math.min(maxCS * GRAIN_PX, 15), 0.5);
+
+    {
+      const r = Math.ceil(blurRadius);
+      const sigma = Math.max(blurRadius / 2.5, 0.001);
+      const kernel = [];
+      let total = 0;
+      for (let k = 0; k <= Math.min(r, 15); k++) {
+        kernel[k] = Math.exp(-k * k / (2 * sigma * sigma));
+        total += k === 0 ? kernel[k] : 2 * kernel[k];
+      }
+      for (let k = 0; k < kernel.length; k++) kernel[k] /= total;
+
+      const blurCount = isBW ? 1 : numLayers;
+      for (let j = 0; j < blurCount; j++) {
+        layerDensities[j] = cpuGaussianBlur(layerDensities[j], width, height, kernel);
+      }
+    }
+
+    // --- Pass 2: Composite blurred densities ---
+    for (let i = 0; i < width * height; i++) {
+      const idx = i * 4;
+      let oR, oG, oB;
+
+      if (isBW) {
+        const dm0 = layers[0].dmax || 2.0;
+        const fog0 = layers[0].fog || 0;
+        const den = layerDensities[0][i];
+        // Subtract fog floor for scan path — maps [fog, dmax] → [0, 1]
+        let lum = rawMode ? 1 - den / dm0 : Math.max(den - fog0, 0) / Math.max(dm0 - fog0, 0.01);
+        lum = Math.max(0, Math.min(1, lum));
+        oR = lum * g.baseTintR;
+        oG = lum * g.baseTintG;
+        oB = lum * g.baseTintB;
+      } else {
+        const dens = [];
+        for (let j = 0; j < numLayers; j++) {
+          dens.push(isPos ? layers[j].dmax - layerDensities[j][i] : layerDensities[j][i]);
         }
         const dir = g.dirInhibition;
         const totalDenSum = dens.reduce((a, b) => a + b, 0);
         const d = dens.map(v => Math.max(0, v - dir * (totalDenSum - v) * 0.15));
         let totR = 0, totG = 0, totB = 0;
-        for (let j = 0; j < layers.length; j++) {
+        for (let j = 0; j < numLayers; j++) {
           const [aR, aG, aB] = dyeA(layers[j].dyeHue, layers[j].dyePurity);
           totR += aR * d[j]; totG += aG * d[j]; totB += aB * d[j];
         }
 
         if (isNeg && !rawMode) {
+          // Subtract fog-only OD floor (scanner calibration against unexposed film base)
+          let fogR = 0, fogG = 0, fogB = 0;
+          for (let j = 0; j < numLayers; j++) {
+            const [aR, aG, aB] = dyeA(layers[j].dyeHue, layers[j].dyePurity);
+            const f = layers[j].fog || 0;
+            fogR += aR * f; fogG += aG * f; fogB += aB * f;
+          }
           const scanExp = 3.0;
-          oR = 1 - Math.exp(-totR * scanExp);
-          oG = 1 - Math.exp(-totG * scanExp);
-          oB = 1 - Math.exp(-totB * scanExp);
+          oR = 1 - Math.exp(-Math.max(totR - fogR, 0) * scanExp);
+          oG = 1 - Math.exp(-Math.max(totG - fogG, 0) * scanExp);
+          oB = 1 - Math.exp(-Math.max(totB - fogB, 0) * scanExp);
         } else if (isNeg) {
           const mh = Math.max(0, Math.min(1, g.maskHue / 60));
           const mR = g.maskDensity * (0.65 * (1 - mh) + 0.45 * mh);
@@ -527,7 +862,7 @@ export class FilmRenderer {
 }
 
 export function renderFilmCPU(imageData, recipe, rawMode) {
-  const tmp = new FilmRenderer(document.createElement('canvas'));
+  const tmp = new FilmRenderer(document.createElement('canvas'), { cpuOnly: true });
   tmp._cpuSource = imageData;
   tmp.hasImage = true;
   return tmp._renderCPU(recipe, rawMode);

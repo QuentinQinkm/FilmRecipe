@@ -160,7 +160,7 @@ function buildLayersTab(container, onInput, onRebuild) {
     container.appendChild(section);
   });
 
-  if (recipe.layers.length < 5) {
+  if (recipe.layers.length < 4) {
     const addBtn = document.createElement('button');
     addBtn.className = 'action-btn';
     addBtn.textContent = '+ Add Layer';

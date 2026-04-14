@@ -31,7 +31,7 @@ src/
                             control definitions, complementHue(),
                             applyDevelopment(), app state, localStorage persistence
   engine/
-    renderer.js             WebGL (GLSL) rendering engine with up to 5 layers on GPU,
+    renderer.js             WebGL (GLSL) rendering engine with up to 4 layers on GPU,
                             Canvas2D CPU fallback only when WebGL unavailable
   ui/
     tabs.js                 3-tab content builder (Layers/Base/Develop)
@@ -84,17 +84,26 @@ User Input (sliders / spectrum drag on desktop)
 6. **Positive reversal** — for slide film: `dmax - density` (applied after stacking)
 7. **DIR inhibition** — inter-layer density suppression (edge sharpness)
 8. **Dye absorption** — Beer-Lambert: complementary hue absorption vectors
-9. **Negative scan** — exponential paper response `1 - exp(-OD * 3.0)`, or raw
-   view with orange mask (mask color controlled by `maskHue` 0-60deg)
+9. **Negative scan** — exponential paper response with fog floor subtraction:
+   the composite shader subtracts the fog-only optical density from the total OD
+   before applying `1 - exp(-imageOD * 3.0)`. This simulates real film scanners
+   that calibrate against the unexposed film strip to set the black level — areas
+   with only fog density render as true black, not muddy gray. Raw view shows
+   transmittance with orange mask (mask color controlled by `maskHue` 0-60deg).
 10. **Per-layer grain** — physics-based crystal emulation applied at the density
    stage (before dye absorption), independently per layer:
-   - **White noise injection**: cheap per-pixel sin-hash noise at density stage.
-     No grid or cell structure — no moiré artifacts possible.
+   - **Static noise texture**: generated once per image load at image resolution.
+     RGBA channels provide 4 independent noise values per pixel (one per layer).
+     NEAREST filtering ensures no interpolation between pixels.
+   - **Correlated noise** (GRAIN_CHROMA = 0.25): 75% shared luminance base + 25%
+     per-layer independent variation. This produces grain that reads as natural
+     luminance texture with subtle color fringing — matching how real film grain
+     appears under magnification (primarily density variation, not RGB speckle).
    - **Binomial statistics**: amplitude `sigma = sqrt(p*(1-p)/N)` where
-     `N = 1/(cs²+0.01)` and `p = density/dmax`
+     `N = 1/(cs²+0.01)` and `p = density/dmax`. Grain peaks at mid-density and
+     vanishes at both unexposed (fog) and fully saturated (dmax) areas.
    - **Silver grain** (`dyePurity < 0.01`): amplitude 1.2× sigma
    - **Dye cloud grain** (`dyePurity >= 0.01`): amplitude 0.7× sigma
-   - **Per-layer seeds**: independent noise per layer
    - Grain IS the density variation, not a post-process overlay
 11. **Per-layer Gaussian blur (grain + resolving power)** — separable Gaussian
    blur applied to per-layer densities via 2 render passes (H + V). Each layer's
@@ -105,14 +114,15 @@ User Input (sliders / spectrum drag on desktop)
    - Softens each layer to match film resolving power
    - Couples image sharpness to crystal size: coarse grain = soft image
    - Preserves physical correctness: `blur(composite(A,B)) ≠ composite(blur(A),blur(B))`
-   - When blur radius < 0.5px, blur passes are skipped entirely
+   - Minimum blur floor of 0.5px ensures per-pixel noise is always smoothed into
+     organic clumps, even at very fine crystal sizes
 12. **Compositing** — reads blurred per-layer densities, applies DIR inhibition,
    dye absorption (Beer-Lambert), reversal, orange mask, base tint
 13. **Gamma encode** — `l2s()`: back to sRGB for display
 
 The WebGL pipeline uses 3 shader programs (density, blur, compositing) with 2
 framebuffer objects. Per-layer densities are packed into RGBA channels (up to 4
-layers with per-layer blur; 5th layer supported without blur). FBO textures use
+layers with per-layer blur via RGBA channel packing). FBO textures use
 UNSIGNED_BYTE with density scaled by 1/4.0 to fit 0-4.0 range. CPU fallback
 (`_renderCPU`) uses matching per-layer Float32Array blur and only activates when
 WebGL is completely unavailable.
@@ -154,7 +164,7 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
       fog: 0.04,             // base + fog (Dmin) — minimum unexposed density (0-0.3)
       crystalSize: 0.35,     // grain crystal size (0.05-2.0), derives ~ISO
     },
-    // ... up to 5 layers
+    // ... up to 4 layers
   ],
   global: {
     reversal: 0,             // 0 = negative (C-41), 1 = positive/slide (E-6)
@@ -200,7 +210,8 @@ layers, negative films have `reversal: 0` with color layers.
 
 ### Per-Layer Parameters
 
-Each layer models one emulsion coating on the film strip. Up to 5 layers stacked.
+Each layer models one emulsion coating on the film strip. Up to 4 layers stacked
+(one per RGBA channel in the density FBO).
 
 | Parameter | UI Label | Range | What It Does |
 |-----------|----------|-------|-------------|
@@ -260,8 +271,11 @@ The curve maps log-exposure to density.
 **Crystal size → grain + ISO + resolving power:** Larger crystals gather more light
 (higher ISO / faster film) but produce coarser grain AND softer images. The grain noise
 amplitude uses binomial statistics: `N = 1/(cs² + 0.01)`. The Gaussian blur radius
-scales with crystal size (`maxCS × GRAIN_PX`), simultaneously creating grain clumps and
-limiting resolving power. This couples all three: coarse grain = high ISO = soft image.
+scales with crystal size (`maxCS × GRAIN_PX`, where GRAIN_PX=3), with a minimum floor
+of 0.5px. This simultaneously creates grain clumps and limits resolving power. Examples:
+Velvia 50 (cs=0.15) gets 0.5px blur (nearly sharp, invisible grain), Portra 400 (cs=0.35)
+gets 1.05px (slight softening, fine grain), Tri-X (cs=0.90) gets 2.7px (noticeable
+softening, prominent grain). This couples all three: coarse grain = high ISO = soft image.
 
 **dyePurity → grain amplitude:** `dyePurity < 0.01` triggers silver grain (1.2× amplitude).
 Higher purity triggers dye cloud grain (0.7× amplitude). After blur, both form organic
@@ -424,10 +438,20 @@ Each layer has a collapsible "H&D Curve" section containing an interactive canva
   compositing preserves physical correctness: dye absorption is nonlinear, so
   `blur(composite(A,B)) ≠ composite(blur(A), blur(B))`. The channel-parallel
   trick (RGB channels = per-layer densities) achieves this with only 2 blur passes.
+- **Correlated noise texture** — grain noise is 75% shared luminance (same base
+  random value across RGBA channels) + 25% per-layer independent variation
+  (GRAIN_CHROMA=0.25). This matches real film grain appearance: primarily luminance
+  texture with subtle color fringing, not the digital-looking RGB speckle that
+  fully independent per-layer noise would produce.
+- **Fog floor subtraction in scanning** — the negative scan path subtracts the
+  fog-only optical density from the total OD, matching how real film scanners
+  calibrate against the unexposed film strip. Without this, fog would raise the
+  black point everywhere, making letterbox bars and deep shadows appear as muddy
+  gray instead of true black.
 - **Silver vs dye cloud via amplitude** — differentiation is purely via noise
   amplitude (1.2× silver, 0.7× dye cloud). After blur, silver grain produces
   high-contrast monochrome clumps; color grain produces luminance variation with
-  subtle color fringing at clump boundaries from uncorrelated per-layer noise.
+  subtle color fringing at clump boundaries from the per-layer noise variation.
 
 ## Known Limitations / Future Work
 
