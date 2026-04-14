@@ -12,7 +12,7 @@ export function Toggle({ label, value, badge, onChange }) {
           className={`toggle${isOn ? ' toggle--on' : ''}`}
           onClick={() => onChange(isOn ? 0 : 1)}
         >
-          <span className="toggle__thumb" />
+          <span className="toggle__thumb" aria-hidden="true" />
         </button>
       </div>
     </div>

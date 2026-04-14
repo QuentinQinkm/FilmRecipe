@@ -35,7 +35,7 @@ Always visible. Three elements:
 **Preset dropdown bar:** Shows current preset name (e.g. "Portra 400"). Tap to
 expand a dropdown panel containing:
 - **Stock templates grid** — 2-column grid of 6 built-in presets (Portra 400,
-  Ektar 100, Superia 400, HP5 Plus, Tri-X 400, Velvia 50)
+  Gold 200, Velvia 50, Kodachrome 64, Ilford HP5, Kodak Tri-X)
 - **Saved recipes list** — user-saved presets from localStorage
 - **Action buttons:** NEW (reset to defaults) and SAVE AS (name + save current state)
 
@@ -108,7 +108,7 @@ No spectrogram. Controls in a scrollable column:
 | Control | Input Type | Range | Notes |
 |---------|-----------|-------|-------|
 | E-6 Reversal | **Toggle** | ON/OFF | Square track, lime accent when ON |
-| Stacking Strength | **Stepper** (−/+) | 0–10 integer | Tap buttons, shows count |
+| Stacking Strength | **Arc gauge** | 0–1 | Tap to fine-adjust, 0.01 step |
 | DIR Inhibition | Slider | 0–1 | |
 | Base Tint Warmth | **Cool/warm gradient strip** | -1 to +1 | Blue→gray→amber visual |
 | Scan Exposure | Slider | 1.0–6.0 | |
@@ -120,11 +120,13 @@ No spectrogram. Controls in a scrollable column:
 
 ## Section 3: Develop
 
-| Control | Input Type | Range | Notes |
-|---------|-----------|-------|-------|
-| Push/Pull | **Center-notched slider** | -2 to +2 | Center marker at 0, PULL/PUSH labels at edges |
-| Dev Time Factor | Slider | 0.5–2.0 | |
-| Agitation | Slider | 0–1 | |
+| Control | Code Name | Input Type | Range | Notes |
+|---------|-----------|-----------|-------|-------|
+| Developer Activity | `developerActivity` | **Rotary knob (hero)** | -0.5 to +0.7 | PULL/PUSH labels, detent ticks |
+| Bath Temperature | `bathTemperatureC` | **Rotary knob (paired)** | 30–42°C | Standard C-41 = 38°C |
+| Agitation | `agitationLevel` | **Rotary knob (paired)** | 0–1 | |
+| Development Time | `developmentTimeMin` | **Compact ±counter** | 2–8 min | Step 0.1, shows "min" suffix |
+| Chemistry Freshness | `chemistryFreshness` | **Compact ±counter** | 0.3–1.0 | 1.0 = fresh, 0.3 = exhausted |
 
 **Lab Notes card:** `#C8FF00` accent line at top, "LAB NOTES" header,
 multiline text input (`#111` surface, placeholder: "Processing notes, batch
@@ -143,9 +145,14 @@ info..."). Stored with recipe, does not affect rendering.
 
 ## Implementation Approach
 
-Add as a v2 toggle alongside existing UI. CSS media query or JS flag switches
-between v1 (current) and v2 (new mobile layout). Shared rendering engine and
-state model — only the UI layer changes.
+Separate `MobilePrototype/` directory using React + Vite for UX testing and
+GitHub Pages distribution. Imports `renderer.js` and `state.js` from the
+existing HTMLPrototype as shared pure-JS modules. The desktop prototype
+(`HTMLPrototype/index.html`) remains untouched as the reference implementation.
+
+Custom Canvas2D widgets (arc gauges, rotary knobs, gradient strips) are
+wrapped in React components via `useRef` + `useEffect`. Simpler controls
+(segmented selectors, counters, toggles) are pure JSX/CSS.
 
 ## Open / In-Progress
 

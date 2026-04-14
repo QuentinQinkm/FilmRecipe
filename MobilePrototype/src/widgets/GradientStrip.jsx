@@ -12,10 +12,10 @@ function drawStrip(canvas, value, min, max, colors) {
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, w, h)
 
-  // Square thumb
+  // Square thumb — clamped so thumb stays fully visible at both extremes
   const normalized = Math.max(0, Math.min(1, (value - min) / (max - min)))
-  const tx = normalized * w
   const tw = 16, th = h + 8
+  const tx = Math.max(tw / 2, Math.min(w - tw / 2, normalized * w))
   ctx.fillStyle = '#E0E0E0'
   ctx.fillRect(tx - tw / 2, -4, tw, th)
   ctx.strokeStyle = '#00000044'
