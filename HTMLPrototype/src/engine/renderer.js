@@ -416,6 +416,7 @@ export class FilmRenderer {
   }
 
   _linkProgram(vs, fs) {
+    if (!vs || !fs) return null;
     const gl = this.gl;
     const prog = gl.createProgram();
     gl.attachShader(prog, vs);
@@ -436,6 +437,8 @@ export class FilmRenderer {
     gl.compileShader(s);
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
       console.error('Shader error:', gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
     }
     return s;
   }
