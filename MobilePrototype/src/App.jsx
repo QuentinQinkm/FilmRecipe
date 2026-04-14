@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { RecipeProvider } from './context/RecipeContext.jsx'
 import { ImageArea } from './components/ImageArea.jsx'
+import { TopBar } from './components/TopBar.jsx'
 
 const SECTIONS = ['LAYER', 'BASE', 'DEVELOP']
 
@@ -12,6 +13,7 @@ export default function App() {
   return (
     <RecipeProvider>
       <div className="app">
+        <TopBar onPresetPress={() => {}} onExport={() => {}} />
         <ImageArea
           section={section}
           onSectionPress={() => {}}
