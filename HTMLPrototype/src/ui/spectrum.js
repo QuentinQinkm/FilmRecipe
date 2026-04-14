@@ -66,7 +66,7 @@ function drawAbsorptionBand(ctx, layers, w, isBW) {
     let total = 0;
     for (const L of layers) {
       const g = gauss(wl, L.sensitizerPeak, L.sensitizerBw);
-      const strength = (isBW ? 0.5 : L.dyePurity) * (clamp(isBW ? 2.5 : L.dmax, MIN_DMAX, MAX_DMAX) / MAX_DMAX);
+      const strength = (isBW ? 0.5 : L.dyePurity) * (clamp(L.dmax || 2.0, MIN_DMAX, MAX_DMAX) / MAX_DMAX);
       total += g * strength;
     }
     ctx.fillStyle = `rgba(0,0,0,${Math.min(0.85, total * 0.6)})`;
@@ -77,7 +77,7 @@ function drawAbsorptionBand(ctx, layers, w, isBW) {
 function drawBellCurve(ctx, layer, w, isBW, dimFactor, isSelected) {
   const peak = layer.sensitizerPeak;
   const bw = layer.sensitizerBw;
-  const dmax = isBW ? 2.5 : (layer.dmax || 2.0);
+  const dmax = layer.dmax || 2.0;
   const purity = isBW ? 0.5 : (layer.dyePurity || 0.5);
   const hue = isBW ? 0 : layer.dyeHue;
   const sat = isBW ? '0%' : '55%';
@@ -110,7 +110,7 @@ function drawBellCurve(ctx, layer, w, isBW, dimFactor, isSelected) {
 
 function drawHdMini(ctx, layer, w, isBW) {
   const peak = layer.sensitizerPeak;
-  const dmax = isBW ? 2.5 : (layer.dmax || 2.0);
+  const dmax = layer.dmax || 2.0;
   const bellH = dmaxToH(dmax);
   if (bellH < 20) return;
   const cx = wlToX(peak, w);
@@ -143,8 +143,26 @@ function drawHdMini(ctx, layer, w, isBW) {
   ctx.restore();
 }
 
-function drawGrainDots() {
-  // Removed: grain dots no longer meaningful with 1px=1grain model
+function drawGrainDots(ctx, layer, w, isBW) {
+  const peak = layer.sensitizerPeak;
+  const bw = layer.sensitizerBw;
+  const cs = layer.crystalSize || 0.3;
+  const dotR = 0.5 + cs * 1.5;
+  const spacing = 3 + cs * 7;
+  const leftX = Math.max(0, wlToX(peak - bw, w));
+  const rightX = Math.min(w, wlToX(peak + bw, w));
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  for (let x = leftX; x < rightX; x += spacing) {
+    const g = gauss(xToWl(x, w), peak, bw);
+    if (g < 0.1) continue;
+    const jx = x + Math.sin(x * 127.1) * spacing * 0.25;
+    ctx.beginPath();
+    ctx.arc(jx, CURVE_BOT - 3, dotR * g, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawOverlapZones(ctx, layers, w, isBW) {
@@ -235,7 +253,7 @@ function hitTest(cx, cy, recipe, w) {
 
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
-    const dmax = isBW ? 2.5 : (L.dmax || 2.0);
+    const dmax = L.dmax || 2.0;
     const bellH = dmaxToH(dmax);
     const px = wlToX(L.sensitizerPeak, w);
     const topY = CURVE_BOT - bellH;
@@ -246,7 +264,7 @@ function hitTest(cx, cy, recipe, w) {
 
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
-    const dmax = isBW ? 2.5 : (L.dmax || 2.0);
+    const dmax = L.dmax || 2.0;
     const bellH = dmaxToH(dmax);
     const halfBw = L.sensitizerBw / 2;
     const lx = wlToX(L.sensitizerPeak - halfBw, w);
@@ -321,12 +339,13 @@ export function buildSpectrum(container, callbacks) {
     }
 
     for (let i = 0; i < layers.length; i++) {
+      drawGrainDots(ctx, layers[i], w, isBW);
       drawHdMini(ctx, layers[i], w, isBW);
     }
 
     for (let i = 0; i < layers.length; i++) {
       const L = layers[i];
-      const dmax = isBW ? 2.5 : (L.dmax || 2.0);
+      const dmax = L.dmax || 2.0;
       const bellH = dmaxToH(dmax);
       drawBwEdgeHandles(ctx, L, w, bellH);
       if (!isBW) drawDmaxHandle(ctx, L, w, bellH, isBW);
@@ -372,7 +391,7 @@ export function buildSpectrum(container, callbacks) {
           startX: cx, startY: cy,
           startPeak: L.sensitizerPeak,
           startBw: L.sensitizerBw,
-          startDmax: isBW ? 2.5 : (L.dmax || 2.0),
+          startDmax: L.dmax || 2.0,
         };
         canvas.setPointerCapture(e.pointerId);
       }
@@ -390,7 +409,7 @@ export function buildSpectrum(container, callbacks) {
         startX: cx, startY: cy,
         startPeak: L.sensitizerPeak,
         startBw: L.sensitizerBw,
-        startDmax: isBW ? 2.5 : (L.dmax || 2.0),
+        startDmax: L.dmax || 2.0,
       };
       canvas.setPointerCapture(e.pointerId);
       e.preventDefault();

@@ -115,7 +115,7 @@ void main() {
     float den = uFog[0] + hd(exposure, uToe[0], uGamma[0], uShoulder[0], dm0);
     den = clamp(den, 0.0, dm0);
 
-    // 1px = 1 grain: noise texture lookup, binomial amplitude
+    // Per-pixel noise texture, binomial amplitude from crystal count
     float noise = layerNoise(0);
     float cs = uCrystal[0];
     float N = 1.0 / (cs * cs + 0.01);
@@ -138,7 +138,7 @@ void main() {
       float e = dot(avail, w) / max(dot(w, vec3(1.0)), 0.001);
       float d = uFog[i] + hd(e, uToe[i], uGamma[i], uShoulder[i], uDmax[i]);
 
-      // 1px = 1 grain: noise texture lookup, binomial amplitude
+      // Per-pixel noise texture, binomial amplitude from crystal count
       float noise = layerNoise(i);
       float cs = uCrystal[i];
       float N = 1.0 / (cs * cs + 0.01);
@@ -243,11 +243,9 @@ export class FilmRenderer {
 
     this.texture = gl.createTexture();
 
-    // Noise texture: image-sized RGBA, filled with Math.random() each render
+    // Noise texture: image-sized RGBA, generated once in setImage()
+    // Grain is static — crystal positions don't change when you adjust sliders
     this.noiseTex = gl.createTexture();
-    this._noiseData = null;
-    this._noiseW = 0;
-    this._noiseH = 0;
 
     this.u = {};
     for (const n of ['uImg','uNoise','uReversal','uRaw','uDir','uMaskDen','uMaskHue','uBaseTint','uPassthrough','uStackStr','uLayerCount','uImgDim']) {
@@ -273,13 +271,8 @@ export class FilmRenderer {
     return s;
   }
 
-  _regenerateNoise(w, h) {
-    if (this._noiseW !== w || this._noiseH !== h) {
-      this._noiseData = new Uint8Array(w * h * 4);
-      this._noiseW = w;
-      this._noiseH = h;
-    }
-    const d = this._noiseData;
+  _generateNoise(w, h) {
+    const d = new Uint8Array(w * h * 4);
     for (let i = 0; i < d.length; i++) {
       d[i] = (Math.random() * 256) | 0;
     }
@@ -304,6 +297,8 @@ export class FilmRenderer {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      // Generate static noise texture once per image — grain pattern is fixed
+      this._generateNoise(w, h);
     }
     this._sourceCanvas = (source instanceof HTMLCanvasElement) ? source : null;
     if (this._sourceCanvas) {
@@ -337,9 +332,6 @@ export class FilmRenderer {
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.useProgram(this.prog);
 
-    // Regenerate noise texture at image resolution each render
-    this._regenerateNoise(canvas.width, canvas.height);
-
     // Bind image texture to unit 0
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
@@ -370,7 +362,7 @@ export class FilmRenderer {
       gl.uniform1f(this.uArrays.uFog[i], layer.fog ?? 0);
       gl.uniform1f(this.uArrays.uDyeHue[i], layer.dyeHue ?? 0);
       gl.uniform1f(this.uArrays.uDyePurity[i], layer.dyePurity ?? 0);
-      gl.uniform1f(this.uArrays.uCrystal[i], (layer.grainIntensity ?? 0.15) * 2.0);
+      gl.uniform1f(this.uArrays.uCrystal[i], layer.crystalSize ?? 0.3);
     }
 
     const g = recipe.global;
@@ -451,9 +443,9 @@ export class FilmRenderer {
         let den = (L.fog || 0) + hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, dm0);
         den = Math.max(0, Math.min(dm0, den));
 
-        // 1px = 1 grain: true random noise, binomial amplitude
+        // Per-pixel noise, binomial amplitude from crystal count
         const noise = layerNoise[0][i];
-        const cs = (L.grainIntensity ?? 0.15) * 2.0;
+        const cs = L.crystalSize ?? 0.3;
         const N = 1 / (cs * cs + 0.01);
         const p = Math.max(0, Math.min(1, den / Math.max(dm0, 0.01)));
         const sigma = Math.sqrt(p * (1 - p) / Math.max(N, 0.1));
@@ -478,9 +470,9 @@ export class FilmRenderer {
           let d = (L.fog || 0) + hdC(exp, L.hdToe, L.hdGamma, L.hdShoulder, L.dmax);
           d = Math.max(0, Math.min(L.dmax, d));
 
-          // 1px = 1 grain: true random noise, binomial amplitude
+          // Per-pixel noise, binomial amplitude from crystal count
           const noise = layerNoise[j][i];
-          const cs = (L.grainIntensity ?? 0.15) * 2.0;
+          const cs = L.crystalSize ?? 0.3;
           const N = 1 / (cs * cs + 0.01);
           const p = Math.max(0, Math.min(1, d / Math.max(L.dmax, 0.01)));
           const sigma = Math.sqrt(p * (1 - p) / Math.max(N, 0.1));
