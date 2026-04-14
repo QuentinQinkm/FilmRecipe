@@ -32,3 +32,16 @@ html, body, #root {
   margin: 0 auto;
   overflow: hidden;
 }
+
+/* Controls panel — takes remaining height, scrolls internally */
+.app__controls {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+/* Image area occupies ~40% of viewport height */
+.image-area { height: 40vh; }
