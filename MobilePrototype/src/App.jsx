@@ -1,5 +1,27 @@
+import { useState } from 'react'
 import { RecipeProvider } from './context/RecipeContext.jsx'
+import { ImageArea } from './components/ImageArea.jsx'
+
+const SECTIONS = ['LAYER', 'BASE', 'DEVELOP']
 
 export default function App() {
-  return <RecipeProvider><div className="app">Film Lab Mobile</div></RecipeProvider>
+  const [sectionIdx, setSectionIdx] = useState(0)
+  const next = () => setSectionIdx(i => Math.min(SECTIONS.length - 1, i + 1))
+  const section = SECTIONS[sectionIdx]
+
+  return (
+    <RecipeProvider>
+      <div className="app">
+        <ImageArea
+          section={section}
+          onSectionPress={() => {}}
+          onNextPress={next}
+          onFullscreen={() => {}}
+        />
+        <div style={{ flex: 1, padding: 16, color: 'var(--text-3)', fontSize: 12 }}>
+          {section} controls go here
+        </div>
+      </div>
+    </RecipeProvider>
+  )
 }
