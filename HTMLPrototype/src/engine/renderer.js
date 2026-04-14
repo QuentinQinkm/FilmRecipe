@@ -282,6 +282,15 @@ void main() {
       }
       vec3 imageOD = max(totalOD - fogOD, vec3(0.0));
       out3 = vec3(1.0) - exp(-imageOD * uScanExp);
+
+      // Orange mask residual — imperfect scanner profiling leaves a subtle
+      // warm color shift. Stronger mask → warmer midtones, better separation.
+      float mh = clamp(uMaskHue / 60.0, 0.0, 1.0);
+      out3 *= vec3(
+        1.0 + uMaskDen * mix(0.08, 0.05, mh),
+        1.0 + uMaskDen * mix(0.02, 0.04, mh),
+        1.0 - uMaskDen * mix(0.04, 0.02, mh)
+      );
     } else if (isNeg) {
       float mh = clamp(uMaskHue / 60.0, 0.0, 1.0);
       vec3 maskOD = vec3(uMaskDen * mix(0.65, 0.45, mh),
@@ -950,6 +959,13 @@ export class FilmRenderer {
           oR = 1 - Math.exp(-Math.max(totR - fogR, 0) * scanExp);
           oG = 1 - Math.exp(-Math.max(totG - fogG, 0) * scanExp);
           oB = 1 - Math.exp(-Math.max(totB - fogB, 0) * scanExp);
+          // Orange mask residual — imperfect scanner profiling leaves a subtle
+          // warm color shift. Stronger mask → warmer midtones, better separation.
+          const mhScan = Math.max(0, Math.min(1, (g.maskHue ?? 30) / 60));
+          const md = g.maskDensity ?? 0;
+          oR *= 1.0 + md * (0.08 * (1 - mhScan) + 0.05 * mhScan);
+          oG *= 1.0 + md * (0.02 * (1 - mhScan) + 0.04 * mhScan);
+          oB *= 1.0 - md * (0.04 * (1 - mhScan) + 0.02 * mhScan);
         } else if (isNeg) {
           const mh = Math.max(0, Math.min(1, g.maskHue / 60));
           const mR = g.maskDensity * (0.65 * (1 - mh) + 0.45 * mh);
