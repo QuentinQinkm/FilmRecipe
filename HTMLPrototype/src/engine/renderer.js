@@ -197,6 +197,7 @@ uniform float uFog[${MAX_LAYERS}];
 uniform float uDir;
 uniform float uMaskDen, uMaskHue;
 uniform vec3 uBaseTint;
+uniform float uScanExp;
 
 ${GLSL_LN10}
 ${GLSL_DYE_ABS}
@@ -279,9 +280,8 @@ void main() {
         vec3 da = dyeAbs(uDyeHue[i], uDyePurity[i]);
         fogOD += da * uFog[i];
       }
-      float scanExp = 3.0;
       vec3 imageOD = max(totalOD - fogOD, vec3(0.0));
-      out3 = vec3(1.0) - exp(-imageOD * scanExp);
+      out3 = vec3(1.0) - exp(-imageOD * uScanExp);
     } else if (isNeg) {
       float mh = clamp(uMaskHue / 60.0, 0.0, 1.0);
       vec3 maskOD = vec3(uMaskDen * mix(0.65, 0.45, mh),
@@ -403,7 +403,7 @@ export class FilmRenderer {
 
     // --- Compositing program uniforms ---
     this.compU = {};
-    for (const n of ['uDensities','uImg','uPassthrough','uReversal','uRaw','uLayerCount','uDir','uMaskDen','uMaskHue','uBaseTint']) {
+    for (const n of ['uDensities','uImg','uPassthrough','uReversal','uRaw','uLayerCount','uDir','uMaskDen','uMaskHue','uBaseTint','uScanExp']) {
       this.compU[n] = gl.getUniformLocation(this.compProg, n);
     }
     this.compU.arrays = {};
@@ -655,6 +655,7 @@ export class FilmRenderer {
     gl.uniform1f(this.compU.uMaskDen, g.maskDensity);
     gl.uniform1f(this.compU.uMaskHue, g.maskHue);
     gl.uniform3f(this.compU.uBaseTint, g.baseTintR, g.baseTintG, g.baseTintB);
+    gl.uniform1f(this.compU.uScanExp, g.scanExposure ?? 3.0);
 
     for (let i = 0; i < MAX_LAYERS; i++) {
       const layer = i < n ? L[i] : {};
@@ -836,7 +837,7 @@ export class FilmRenderer {
             const f = layers[j].fog || 0;
             fogR += aR * f; fogG += aG * f; fogB += aB * f;
           }
-          const scanExp = 3.0;
+          const scanExp = g.scanExposure ?? 3.0;
           oR = 1 - Math.exp(-Math.max(totR - fogR, 0) * scanExp);
           oG = 1 - Math.exp(-Math.max(totG - fogG, 0) * scanExp);
           oB = 1 - Math.exp(-Math.max(totB - fogB, 0) * scanExp);
