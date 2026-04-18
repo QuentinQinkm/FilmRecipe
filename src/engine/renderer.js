@@ -629,6 +629,21 @@ export class FilmRenderer {
     const L = recipe.layers;
     const n = Math.min(L.length, MAX_LAYERS);
     const g = recipe.global;
+    const bypass = !!g.bypass;
+
+    // Bypass / press-and-hold-image: skip passes 1–3 + halation entirely and
+    // run the composite shader in passthrough mode. Toggle stays snappy.
+    if (bypass) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(this.compProg);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.uniform1i(this.compU.uImg, 1);
+      gl.uniform1f(this.compU.uPassthrough, 1);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return;
+    }
 
     const maxCS = Math.max(...L.map(l => l.crystalSize || 0.3));
     const softness = g.grainSoftness ?? 1.0;
@@ -709,7 +724,10 @@ export class FilmRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.uniform1i(this.compU.uImg, 1);
 
-    gl.uniform1f(this.compU.uPassthrough, 0);
+    // Bypass / "Untouched" — when set, the composite shader skips all film
+    // processing and renders the source image as-is. Mirrors the macOS
+    // `FilmGlobalSettings.bypass` flag and the press-and-hold-image gesture.
+    gl.uniform1f(this.compU.uPassthrough, g.bypass ? 1 : 0);
     gl.uniform1f(this.compU.uReversal, g.reversal || 0);
     gl.uniform1f(this.compU.uRaw, rawMode ? 1 : 0);
     gl.uniform1i(this.compU.uLayerCount, n);
@@ -791,6 +809,13 @@ export class FilmRenderer {
     const out = new ImageData(width, height);
     const dst = out.data;
     const { layers, global: g } = recipe;
+
+    // Bypass / press-and-hold-image: skip the entire pipeline and copy the
+    // source through. Same short-circuit as the GPU path.
+    if (g.bypass) {
+      dst.set(data);
+      return out;
+    }
     const tw = g.baseTintWarmth ?? 0;
     const baseTintR = 1.0 + tw * 0.06;
     const baseTintG = 1.0;

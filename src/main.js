@@ -1,4 +1,4 @@
-import { state, cloneTemplate, applyDevelopment, LAB_DEFAULTS } from './state.js';
+import { state, cloneTemplate, applyDevelopment, LAB_DEFAULTS, clearBypassOnFirstEdit } from './state.js';
 import { FilmRenderer } from './engine/renderer.js';
 import { buildTabContent, syncSliders } from './ui/tabs.js';
 import { buildSpectrum } from './ui/spectrum.js';
@@ -16,6 +16,8 @@ function mountSpectrum() {
   if (spectrumHandle) spectrumHandle.destroy();
   spectrumHandle = buildSpectrum(spectrumBar, {
     onInput() {
+      // Spectrum drags count as edits — same bypass-clear path as sliders.
+      clearBypassOnFirstEdit();
       syncSliders();
       renderIfImage();
     },
@@ -29,7 +31,14 @@ function mountSpectrum() {
 
 function render() {
   const developed = applyDevelopment(state.currentRecipe, state.labState);
-  renderer.render(developed, state.rawMode);
+  // Press-and-hold-image peek: layer a bypass:1 override on top of the
+  // developed recipe so the image instantly snaps to the original. Doesn't
+  // mutate the underlying recipe — the user's edits are preserved on release.
+  // Mirrors `ViewerPaneView.viewportRecipe` on macOS.
+  const forRender = state.peeking
+    ? { ...developed, global: { ...developed.global, bypass: 1 } }
+    : developed;
+  renderer.render(forRender, state.rawMode);
 }
 
 function rebuildTabs() {
@@ -37,6 +46,10 @@ function rebuildTabs() {
 }
 
 function onSliderInput() {
+  // Any deliberate edit lifts the recipe out of Untouched/bypass mode so the
+  // user can actually see the change land. Press-and-hold-peek is a separate
+  // path that doesn't pass through here.
+  clearBypassOnFirstEdit();
   if (spectrumHandle) spectrumHandle.repaint();
   renderIfImage();
 }
@@ -90,9 +103,11 @@ initTopbar({
   },
 });
 
-// Initial state
-state.currentRecipe = cloneTemplate('Portra 400');
-state.currentTemplate = 'Portra 400';
+// Initial state — boot into Untouched so the first render is a passthrough
+// of whatever the user uploads. Picking any stock from the strip leaves
+// bypass mode automatically (Untouched has bypass:1; the others have :0).
+state.currentRecipe = cloneTemplate('Untouched');
+state.currentTemplate = 'Untouched';
 state.labState = { ...LAB_DEFAULTS };
 mountSpectrum();
 rebuildAndRender();

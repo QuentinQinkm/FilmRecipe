@@ -226,6 +226,26 @@ body {
   border-radius: 4px;
 }
 
+/* "ORIGINAL" pill shown while the user is press-and-hold-peeking the
+   source image. Hidden by default; .visible toggled from canvas.js. */
+.peek-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  background: rgba(255,255,255,0.92);
+  color: #000;
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-weight: 600;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 80ms ease-out;
+  z-index: 5;
+}
+.peek-badge.visible { opacity: 1; }
+
 /* === Film strip === */
 .film-strip {
   height: 48px;
