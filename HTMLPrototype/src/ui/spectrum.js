@@ -1,11 +1,14 @@
-import { state, complementHue } from '../state.js';
+import { state } from '../state.js';
 
 const WL_MIN = 380;
 const WL_MAX = 700;
 const WL_RANGE = WL_MAX - WL_MIN;
 const POINTER_R = 18;
+// Matches `ParameterRanges.dmax` in the engine. The visualization clips the
+// bell-curve height into this range so the on-screen dmax handle scales
+// the same way the renderer does.
 const MAX_DMAX = 3.5;
-const MIN_DMAX = 0.5;
+const MIN_DMAX = 0.05;
 const DMAX_RANGE = MAX_DMAX - MIN_DMAX;
 
 const RAINBOW = [
@@ -119,22 +122,28 @@ function drawHdMini(ctx, layer, w, isBW) {
   const toe = layer.hdToe || 0.2;
   const gamma = clamp(layer.hdGamma || 0.7, 0.3, 3.0);
   const sho = layer.hdShoulder || 0.15;
+  const fog = layer.fog || 0;
 
+  // Engine-matching slope (renderer.js DENSITY_FRAG_SRC `hd()`):
+  //   slope = gamma * dmax / effRange
+  // Plotted density mapped 0..MAX_DMAX → 0..mH so the mini's curve height
+  // tracks dmax (lower dmax → flatter, higher → fills the box) — same as the
+  // big H&D Curve panel (tabs.js) and the actual rendered output.
   ctx.save();
   ctx.beginPath();
   for (let i = 0; i <= mW; i++) {
     const t = i / mW;
     const effRange = Math.max(1 - toe * 0.5 - sho * 0.5, 0.01);
-    const slope = gamma / effRange;
+    const slope = (gamma * dmax) / effRange;
     let den;
     if (t <= toe && toe > 0.001) { den = slope * toe * 0.5 * (t / toe) ** 2; }
     else if (t >= 1 - sho && sho > 0.001) {
       const s = (t - (1 - sho)) / sho;
       den = slope * (toe * 0.5 + Math.max(1 - toe - sho, 0.01)) + slope * sho * 0.5 * (2 * s - s * s);
     } else { den = slope * (toe * 0.5 + (t - toe)); }
-    den = clamp(den / (gamma * 1.5), 0, 1);
+    den = clamp(den, 0, dmax) + fog;
     const px = cx - mW / 2 + i;
-    const py = topY + 5 + mH - den * mH;
+    const py = topY + 5 + mH - clamp(den / MAX_DMAX, 0, 1) * mH;
     if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
   }
   ctx.strokeStyle = 'rgba(255,255,255,0.45)';
@@ -439,7 +448,9 @@ export function buildSpectrum(container, callbacks) {
     if (dragInfo.type === HIT_POINTER) {
       const deltaWl = ((cx - dragInfo.startX) / w) * WL_RANGE;
       L.sensitizerPeak = Math.round(clamp(dragInfo.startPeak + deltaWl, WL_MIN, WL_MAX));
-      L.dyeHue = complementHue(L.sensitizerPeak);
+      // Note: dyeHue intentionally NOT touched here — engine treats hue as
+      // an authored value, not a derived one. Drag the dye-hue slider in
+      // the layer editor (or the macOS/iOS hue scrub gesture) to retune it.
     } else if (dragInfo.type === HIT_TOP && !isBW) {
       const deltaY = dragInfo.startY - cy;
       const deltaDmax = (deltaY / CURVE_H) * DMAX_RANGE;

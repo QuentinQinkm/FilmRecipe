@@ -1,7 +1,7 @@
 import {
   state, STOCK_TEMPLATES, cloneTemplate, cloneRecipe,
   loadSavedRecipes, saveCustomRecipe, deleteCustomRecipe,
-  createBlankRecipe, LAB_DEFAULTS, BLANK_RECIPE,
+  LAB_DEFAULTS,
 } from '../state.js';
 
 let callbacks = {};
@@ -68,14 +68,11 @@ export function doSaveAs() {
   buildFilmStrip();
 }
 
+// "+ New" lands on the Untouched bypass recipe — matches macOS
+// `PresetLibrary.createNew()` which also seeds a bypass=true identity recipe.
+// First parameter the user touches will clear bypass and reveal their edit.
 export function doNewFilm() {
-  state.currentRecipe = createBlankRecipe();
-  state.currentTemplate = '';
-  state.recipeName = '';
-  state.isDirty = false;
-  state.labState = { ...LAB_DEFAULTS };
-  highlightStrip('', false);
-  callbacks.onTemplateChange();
+  selectTemplate('Untouched');
 }
 
 function highlightStrip(name, isSaved) {
@@ -93,7 +90,11 @@ export function buildFilmStrip() {
   for (const name of Object.keys(STOCK_TEMPLATES)) {
     const t = STOCK_TEMPLATES[name];
     const allSilver = t.layers.every(l => l.dyePurity < 0.01);
-    const group = allSilver ? 'bw' : t.global.reversal ? 'rev' : 'neg';
+    // "Untouched" gets its own visual group so it reads as a starter recipe
+    // distinct from the cataloged stocks. Order in STOCK_TEMPLATES puts it first.
+    const group = t.global.bypass
+      ? 'bypass'
+      : allSilver ? 'bw' : t.global.reversal ? 'rev' : 'neg';
     if (lastGroup && group !== lastGroup) {
       const sep = document.createElement('span');
       sep.className = 'strip-sep';

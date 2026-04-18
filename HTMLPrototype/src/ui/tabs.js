@@ -1,24 +1,28 @@
 import {
   state, PRO_LAYER_CONTROLS,
   GLOBAL_CONTROLS, MASK_CONTROLS, STEP_TWO_CONTROLS,
-  LAYER_CONTROLS, makeDefaultLayer, complementHue,
+  LAYER_CONTROLS, makeDefaultLayer,
 } from '../state.js';
 
 // Controls shown for each layer
 const SPECTRAL_CONTROLS = LAYER_CONTROLS.filter(([key]) =>
   key === 'sensitizerPeak' || key === 'sensitizerBw'
 );
+// Hue + purity + dmax — hue is now an authored, hand-editable value (no
+// longer auto-derived from sensitizerPeak), so it sits with the other dye
+// controls. Hidden for silver/B&W layers in buildLayersTab below.
 const DYE_CONTROLS = LAYER_CONTROLS.filter(([key]) =>
-  key === 'dyePurity' || key === 'dmax'
+  key === 'dyeHue' || key === 'dyePurity' || key === 'dmax'
 );
 const GRAIN_CONTROLS = [
-  ['crystalSize', 'Grain size', 'Crystal size', '', 0.05, 2, 0.01, 2],
+  ['crystalSize', 'Grain size', 'Crystal size', '', 0.0, 0.5, 0.01, 2],
 ];
 
-// ISO approximation from crystal size
-// Bigger crystals → faster film. crystalSize 0.05→ISO 25, 0.3→ISO 400, 0.9→ISO 1600, 2.0→ISO 6400
+// ISO approximation from crystal size. Engine clamps cs to 0.0–0.5;
+// we treat 0.05 as the floor for ISO purposes (anything finer reads as
+// effectively grainless). Calibration: 0.05→25, 0.30→400, 0.50→1600.
 function crystalToISO(cs) {
-  return Math.round(25 * Math.pow(cs / 0.05, 1.1));
+  return Math.round(25 * Math.pow(Math.max(cs, 0.05) / 0.05, 1.8));
 }
 
 /**
@@ -128,17 +132,29 @@ function buildLayersTab(container, onInput, onRebuild) {
 
     const onLayerInput = () => { state.isDirty = true; onInput(); };
 
+    // The H&D canvas lives inside `details` (built below) but `dmax` lives in
+    // the dye/dmax group above it. Use a forward-reference repaint so dmax
+    // edits also redraw the curve — matches the engine, where dmax scales
+    // both the dashed reference line AND the curve's slope.
+    let hdCanvasRef = null;
+    const repaintHd = () => { if (hdCanvasRef && hdCanvasRef._repaint) hdCanvasRef._repaint(); };
+    const onShapeInput = () => { repaintHd(); onLayerInput(); };
+
     // Spectral: sensitizerPeak, sensitizerBw
     buildGroup(section, layer, SPECTRAL_CONTROLS, onLayerInput);
 
     // Silver/Color toggle + dye purity slider
     buildSilverToggle(section, layer, () => { state.isDirty = true; onRebuild(); });
     if (!isSilver) {
-      buildGroup(section, layer, DYE_CONTROLS, onLayerInput);
-    } else {
-      // Silver layers still need dmax
+      // Split DYE_CONTROLS so dmax gets the H&D-repainting callback while
+      // hue/purity (which don't reshape the curve) stay on plain onLayerInput.
+      const dyeNoDmax = DYE_CONTROLS.filter(([key]) => key !== 'dmax');
       const dmaxOnly = DYE_CONTROLS.filter(([key]) => key === 'dmax');
-      buildGroup(section, layer, dmaxOnly, onLayerInput);
+      buildGroup(section, layer, dyeNoDmax, onLayerInput);
+      buildGroup(section, layer, dmaxOnly, onShapeInput);
+    } else {
+      const dmaxOnly = DYE_CONTROLS.filter(([key]) => key === 'dmax');
+      buildGroup(section, layer, dmaxOnly, onShapeInput);
     }
 
     // H&D Curve — collapsible interactive graph + fog slider
@@ -146,12 +162,9 @@ function buildLayersTab(container, onInput, onRebuild) {
     details.className = 'layer-advanced';
     details.innerHTML = '<summary>H&D Curve</summary>';
     buildHDCurve(details, layer, onLayerInput);
+    hdCanvasRef = details.querySelector('.hd-curve-canvas');
     const FOG_CONTROL = [['fog', 'Base fog', 'Base + fog (Dmin)', '', 0, 0.3, 0.01, 2]];
-    buildGroup(details, layer, FOG_CONTROL, () => {
-      const hdCanvas = details.querySelector('.hd-curve-canvas');
-      if (hdCanvas && hdCanvas._repaint) hdCanvas._repaint();
-      onLayerInput();
-    });
+    buildGroup(details, layer, FOG_CONTROL, onShapeInput);
     section.appendChild(details);
 
     // Grain slider + ISO readout
@@ -216,17 +229,22 @@ const SHO_MIN = 0, SHO_MAX = 0.5;
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-function hdCurve(t, toe, gamma, shoulder) {
+// Mirrors the engine's `hd()` (GLSL) and `hdC()` (CPU) — slope is scaled by
+// `dm` so the curve's actual maximum density is tied to dmax (Option A).
+// Engine refs: renderer.js DENSITY_FRAG_SRC `hd()` and CPU `hdC()`.
+function hdCurve(t, toe, gamma, shoulder, dm) {
   const effRange = Math.max(1 - toe * 0.5 - shoulder * 0.5, 0.01);
-  const slope = gamma / effRange;
+  const slope = (gamma * dm) / effRange;
+  let den;
   if (t <= toe && toe > 0.001) {
-    return slope * toe * 0.5 * (t / toe) ** 2;
+    den = slope * toe * 0.5 * (t / toe) ** 2;
   } else if (t >= 1 - shoulder && shoulder > 0.001) {
     const s = (t - (1 - shoulder)) / shoulder;
-    return slope * (toe * 0.5 + Math.max(1 - toe - shoulder, 0.01)) + slope * shoulder * 0.5 * (2 * s - s * s);
+    den = slope * (toe * 0.5 + Math.max(1 - toe - shoulder, 0.01)) + slope * shoulder * 0.5 * (2 * s - s * s);
   } else {
-    return slope * (toe * 0.5 + (t - toe));
+    den = slope * (toe * 0.5 + (t - toe));
   }
+  return clamp(den, 0, dm);
 }
 
 function buildHDCurve(container, layer, onInput) {
@@ -340,11 +358,12 @@ function buildHDCurve(container, layer, onInput) {
       ctx.fillText('fog', pad + 2, fogY - 3);
     }
 
-    // Draw curve (fog shifts it up, clamped at dmax)
+    // Draw curve (fog shifts it up; engine clamps the curve part to dmax then
+    // adds fog, so total may exceed dmax by the fog amount — same as engine).
     ctx.beginPath();
     for (let px = 0; px <= plotW; px++) {
       const t = px / plotW;
-      const d = clamp(fog + hdCurve(t, toe, gamma, shoulder), 0, dmax);
+      const d = fog + hdCurve(t, toe, gamma, shoulder, dmax);
       const x = pad + px;
       const y = plotBottom - clamp(d * scale, 0, 1) * plotH;
       if (px === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
@@ -366,20 +385,20 @@ function buildHDCurve(container, layer, onInput) {
 
     // Drag handles (positions include fog offset)
     // Toe handle: at toe boundary, at curve height
-    const toeD = fog + hdCurve(toe, toe, gamma, shoulder);
+    const toeD = fog + hdCurve(toe, toe, gamma, shoulder, dmax);
     const toeHx = toeEndX;
     const toeHy = plotBottom - clamp(toeD * scale, 0, 1) * plotH;
     drawHandle(ctx, toeHx, toeHy, dragTarget === 'toe' ? '#6bb8ff' : 'rgba(100,180,255,0.6)');
 
     // Shoulder handle: at shoulder boundary
-    const shoD = fog + hdCurve(1 - shoulder, toe, gamma, shoulder);
+    const shoD = fog + hdCurve(1 - shoulder, toe, gamma, shoulder, dmax);
     const shoHx = shoStartX;
     const shoHy = plotBottom - clamp(shoD * scale, 0, 1) * plotH;
     drawHandle(ctx, shoHx, shoHy, dragTarget === 'shoulder' ? '#ffaa66' : 'rgba(255,150,100,0.6)');
 
     // Gamma handle: midpoint of curve
     const midT = toe + (1 - toe - shoulder) / 2;
-    const midD = fog + hdCurve(midT, toe, gamma, shoulder);
+    const midD = fog + hdCurve(midT, toe, gamma, shoulder, dmax);
     const gammaHx = pad + midT * plotW;
     const gammaHy = plotBottom - clamp(midD * scale, 0, 1) * plotH;
     drawHandle(ctx, gammaHx, gammaHy, dragTarget === 'gamma' ? '#fff' : 'rgba(255,255,255,0.6)');
@@ -411,24 +430,25 @@ function buildHDCurve(container, layer, onInput) {
     const plotBottom = HD_H - HD_PAD * 0.75;
     const toe = layer.hdToe, gamma = layer.hdGamma, shoulder = layer.hdShoulder;
     const fog = layer.fog || 0;
+    const dmax = layer.dmax || 2.0;
     const scale = 1 / 3.5;
     const hitR = 16;
 
     // Toe
-    const toeD = fog + hdCurve(toe, toe, gamma, shoulder);
+    const toeD = fog + hdCurve(toe, toe, gamma, shoulder, dmax);
     const toeHx = HD_PAD + toe * plotW;
     const toeHy = plotBottom - clamp(toeD * scale, 0, 1) * plotH;
     if ((cx - toeHx) ** 2 + (cy - toeHy) ** 2 < hitR ** 2) return 'toe';
 
     // Shoulder
-    const shoD = fog + hdCurve(1 - shoulder, toe, gamma, shoulder);
+    const shoD = fog + hdCurve(1 - shoulder, toe, gamma, shoulder, dmax);
     const shoHx = HD_PAD + (1 - shoulder) * plotW;
     const shoHy = plotBottom - clamp(shoD * scale, 0, 1) * plotH;
     if ((cx - shoHx) ** 2 + (cy - shoHy) ** 2 < hitR ** 2) return 'shoulder';
 
     // Gamma (midpoint)
     const midT = toe + (1 - toe - shoulder) / 2;
-    const midD = fog + hdCurve(midT, toe, gamma, shoulder);
+    const midD = fog + hdCurve(midT, toe, gamma, shoulder, dmax);
     const gammaHx = HD_PAD + midT * plotW;
     const gammaHy = plotBottom - clamp(midD * scale, 0, 1) * plotH;
     if ((cx - gammaHx) ** 2 + (cy - gammaHy) ** 2 < hitR ** 2) return 'gamma';
@@ -572,7 +592,7 @@ function buildGrainWithISO(container, layer, onInput) {
 
   const slider = document.createElement('input');
   slider.type = 'range';
-  slider.min = 0.05; slider.max = 2; slider.step = 0.01;
+  slider.min = 0.0; slider.max = 0.5; slider.step = 0.01;
   slider.value = layer.crystalSize;
   slider.dataset.key = 'crystalSize';
   slider.dataset.decimals = '2';
@@ -618,9 +638,9 @@ function makeSlider(container, obj, key, _simpleLabel, proLabel, unit, min, max,
   slider.addEventListener('input', () => {
     const v = parseFloat(slider.value);
     obj[key] = v;
-    if (key === 'sensitizerPeak') {
-      obj.dyeHue = complementHue(v);
-    }
+    // dyeHue used to auto-track sensitizerPeak here. Engine now treats hue
+    // as an authored value (set once via complementHue in makeDefaultLayer
+    // and edited directly), so the implicit rewrite is gone.
     valEl.textContent = unit ? `${v.toFixed(decimals)}${unit}` : v.toFixed(decimals);
     onInput();
   });

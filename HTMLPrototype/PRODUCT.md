@@ -155,10 +155,17 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
   all silver layers renders as B&W. Users can mix color and silver layers freely.
 - **Orange mask**: a base property (`maskDensity` in `global`), always available.
   Physically meaningful only for negative film but not gated by film type.
-- **Dye hue**: auto-derived from `sensitizerPeak` via `complementHue()` — the dye
-  formed is always the complement of the wavelength the layer absorbs (red-sensitive
-  layer -> cyan dye, green -> magenta, blue -> yellow). `dyeHue` is stored on the
-  layer but auto-updated whenever `sensitizerPeak` changes.
+- **Dye hue**: authored per layer. Seeded once at layer creation via
+  `complementHue()` (red-sensitive layer → cyan dye, green → magenta, blue → yellow)
+  and then editable directly via the Dye hue slider in the Layers tab. The engine
+  no longer rewrites `dyeHue` when `sensitizerPeak` changes — this matches real
+  film stocks where the dye chemistry is chosen for the look (Portra's warm cyan
+  ≈ 185°), not derived mathematically from the sensitizer.
+- **Bypass / "Untouched"**: a `global.bypass` flag short-circuits the engine to a
+  passthrough of the source image. The "Untouched" stock recipe ships with
+  `bypass: 1`; touching any slider clears it. There is also a press-and-hold
+  gesture on the canvas — hold to peek the original, release to return. This
+  mirrors the macOS `FilmGlobalSettings.bypass` flag and the iOS viewer gesture.
 
 ### Recipe Object
 
@@ -167,20 +174,21 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
   layers: [
     {
       name: 'cyan',
-      sensitizerPeak: 620,   // nm — wavelength of peak sensitivity
-      sensitizerBw: 80,      // nm — Gaussian bandwidth (FWHM)
-      dyeHue: 185,           // degrees — auto-derived from sensitizerPeak via complementHue()
+      sensitizerPeak: 620,   // nm — wavelength of peak sensitivity (380-700)
+      sensitizerBw: 80,      // nm — Gaussian bandwidth (FWHM) (30-200)
+      dyeHue: 185,           // degrees (0-359) — authored per layer; seeded via complementHue() at creation
       dyePurity: 0.70,       // 0-1 — dye coupler presence (0 = silver/B&W, >0 = color)
-      dmax: 2.1,             // max optical density
+      dmax: 2.1,             // max optical density (0.05-3.5)
       hdToe: 0.22,           // H&D shadow compression zone width (0-0.5)
       hdGamma: 0.68,         // H&D slope / contrast (0.3-3.0)
       hdShoulder: 0.18,      // H&D highlight rolloff zone width (0-0.5)
       fog: 0.04,             // base + fog (Dmin) — minimum unexposed density (0-0.3)
-      crystalSize: 0.35,     // grain crystal size (0.05-2.0), derives ~ISO
+      crystalSize: 0.35,     // grain crystal size (0.0-0.5), derives ~ISO
     },
-    // ... up to 4 layers
+    // ... up to 4 layers (enforced by `MAX_LAYERS` in renderer.js)
   ],
   global: {
+    bypass: 0,               // 0 = run pipeline, 1 = passthrough source image (Untouched / peek)
     reversal: 0,             // 0 = negative (C-41), 1 = positive/slide (E-6)
     stackingStrength: 0,     // 0-1 — how strongly upper layers attenuate light for lower ones
     maskDensity: 0.42,       // orange mask strength
@@ -188,7 +196,7 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
     dirInhibition: 0.35,     // DIR coupler strength
     baseTintWarmth: 0.5,     // -1 (cool/blue) to +1 (warm/amber), derives RGB tint
     scanExposure: 3.0,       // scanning contrast / paper grade (1.0-6.0)
-    grainSoftness: 1.50,     // blur radius multiplier (0.5-3.0×) — spatial softness of grain
+    grainSoftness: 1.50,     // blur radius multiplier (0.0-2.0×) — spatial softness of grain
     halation: 0.25,          // highlight glow strength (0-1)
   }
 }
@@ -208,18 +216,26 @@ There is **no `filmType` enum**. Film behavior emerges from physical properties:
 
 ### Stock Templates
 
-Six built-in films: Portra 400, Gold 200, Velvia 50, Kodachrome 64, Ilford HP5,
+Seven built-in entries: **Untouched** (the bypass starter — see Bypass /
+"Untouched" above), Portra 400, Gold 200, Velvia 50, Kodachrome 64, Ilford HP5,
 Kodak Tri-X. Defined as `STOCK_TEMPLATES` in `state.js`. Film type is derived from
 properties: positive films have `reversal: 1`, B&W films have `dyePurity: 0` on all
-layers, negative films have `reversal: 0` with color layers.
+layers, negative films have `reversal: 0` with color layers, and Untouched has
+`bypass: 1`.
 
 ### Key Functions in `state.js`
 
 - `complementHue(wl)` — piecewise linear map from sensitizer wavelength to
-  complementary dye hue. Uses SPECTRAL_STOPS lookup + 180deg rotation.
+  complementary dye hue. Uses SPECTRAL_STOPS lookup + 180deg rotation. Called
+  once at layer creation to seed `dyeHue`; not re-invoked on subsequent
+  `sensitizerPeak` changes.
 - `applyDevelopment(recipe, lab)` — non-destructive: clones recipe, applies
   developer activity, temperature, time, agitation, freshness effects.
-- `makeDefaultLayer(index)` — creates a new layer with auto-derived dyeHue.
+- `makeDefaultLayer(index)` — creates a new layer; seeds `dyeHue` from
+  `complementHue(peak)` once. The result is then hand-editable.
+- `clearBypassOnFirstEdit()` — flips `global.bypass` off on the first
+  user-driven slider/spectrum edit, so changes to an Untouched recipe become
+  visible immediately.
 
 ## Parameter Reference
 
@@ -230,16 +246,16 @@ Each layer models one emulsion coating on the film strip. Up to 4 layers stacked
 
 | Parameter | UI Label | Range | What It Does |
 |-----------|----------|-------|-------------|
-| `sensitizerPeak` | Sensitizer peak | 420-660 nm | Wavelength this layer is most sensitive to. Auto-derives `dyeHue` (complement). Moving peak shifts which colors the layer captures. |
-| `sensitizerBw` | Sensitizer bandwidth | 20-180 nm | FWHM of the Gaussian sensitivity curve. Narrow = selective (saturated color), wide = broad response (desaturated/pastel). |
+| `sensitizerPeak` | Sensitizer peak | 380-700 nm | Wavelength this layer is most sensitive to. Moving the peak shifts which colors the layer captures. Does NOT auto-update `dyeHue` — that's an authored value. |
+| `sensitizerBw` | Sensitizer bandwidth | 30-200 nm | FWHM of the Gaussian sensitivity curve. Narrow = selective (saturated color), wide = broad response (desaturated/pastel). |
+| `dyeHue` | Dye hue | 0-359° | Hue of the dye formed in this layer. Seeded once from `complementHue(sensitizerPeak)` at creation, then hand-editable. Hidden for silver layers. |
 | `dyePurity` | Dye purity | 0-1 | Dye coupler concentration. 0 = pure silver halide (B&W grain), >0 = color dye cloud. Controls how strongly the layer forms colored dye vs monochrome silver. Hidden when emulsion type is "Silver". |
-| `dmax` | Dmax | 0.5-4.0 | Maximum optical density the layer can reach. Higher = deeper blacks / more saturated color. Clamps the H&D curve ceiling. |
+| `dmax` | Dmax | 0.05-3.5 | Maximum optical density the layer can reach. Higher = deeper blacks / more saturated color. Clamps the H&D curve ceiling. |
 | `hdToe` | Toe | 0-0.5 | Width of the shadow compression zone on the H&D curve. Larger toe = softer shadow rolloff, more shadow detail retention. |
 | `hdGamma` | Gamma | 0.3-3.0 | Slope of the H&D curve's linear region. Higher gamma = more contrast. This is the primary contrast control. |
 | `hdShoulder` | Shoulder | 0-0.5 | Width of the highlight compression zone. Larger shoulder = softer highlight rolloff, more highlight headroom before clipping. |
 | `fog` | Base + fog (Dmin) | 0-0.3 | Minimum density of unexposed emulsion. Shifts the entire H&D curve upward. Represents chemical fog and base density. Higher fog = reduced dynamic range, lifted shadows. |
-| `crystalSize` | Crystal size | 0.05-2.0 | Size of silver halide crystals. Larger crystals = more grain but more light-gathering (faster film). Derives approximate ISO: `ISO ≈ 25 × (cs/0.05)^1.1`. |
-| `dyeHue` | (auto) | 0-360° | Complementary hue of the dye formed. Auto-derived from `sensitizerPeak` via `complementHue()`. Not directly editable. |
+| `crystalSize` | Crystal size | 0.0-0.5 | Size of silver halide crystals. Larger crystals = more grain but more light-gathering (faster film). Derives approximate ISO: `ISO ≈ 25 × (cs/0.05)^1.8` (calibrated 0.05→25, 0.30→400, 0.50→1600). |
 
 **Emulsion type toggle:** Silver vs Color dye. Silver sets `dyePurity = 0` and hides
 the dye purity slider. Color dye restores the previous dyePurity value. Silver layers
@@ -254,6 +270,7 @@ a derived display, not a separate parameter. Bigger crystals = faster film = hig
 
 | Parameter | UI Label | Range | What It Does |
 |-----------|----------|-------|-------------|
+| `bypass` | (Untouched / press-and-hold) | 0 or 1 | When 1, the renderer short-circuits to a passthrough of the source image. Set on the Untouched starter; cleared automatically by `clearBypassOnFirstEdit()` on the first slider/spectrum change. Also driven momentarily by the press-and-hold-image gesture. |
 | `reversal` | Process | 0 or 1 | 0 = C-41 negative, 1 = E-6 reversal (slide). Reversal inverts density: `dmax - density`. Changes the entire look from negative to positive. |
 | `stackingStrength` | Layer stacking | 0-1 | How much upper layers attenuate light reaching lower layers (Beer-Lambert). 0 = independent layers, 1 = full physical stacking. Affects color cross-talk between layers. |
 | `maskDensity` | Mask density | 0-1 | Orange mask strength (for negative film). Physically compensates for unwanted dye absorptions. Higher = more orange base. |
@@ -261,7 +278,7 @@ a derived display, not a separate parameter. Bigger crystals = faster film = hig
 | `dirInhibition` | DIR couplers | 0-1 | Developer Inhibitor Releasing coupler strength. Creates inter-layer density suppression at edges, increasing apparent sharpness and reducing color fringing. |
 | `baseTintWarmth` | Base tint warmth | -1 to 1 | Film base warmth. -1 = cool/blue, 0 = neutral, +1 = warm/amber. Derives RGB: R=1+w×0.06, G=1.0, B=1-w×0.12. |
 | `scanExposure` | Scan exposure | 1.0-6.0 | Scanning contrast / paper grade. Controls the exponential response in negative scanning. Low = flat, high = punchy. |
-| `grainSoftness` | Grain softness | 0.5×-3.0× | Multiplier on blur radius. Controls spatial softness of grain independently from crystal size (amplitude). Low = punchy/sharp, high = creamy/soft. |
+| `grainSoftness` | Grain softness | 0.0×-2.0× | Multiplier on blur radius. Controls spatial softness of grain independently from crystal size (amplitude). Low = punchy/sharp, high = creamy/soft. |
 | `halation` | Halation strength | 0-1 | Warm highlight glow from light scattering through film base. Adds large-radius blurred bright pixels with warm tint. |
 
 ### Development Parameters (Lab State)
@@ -278,8 +295,11 @@ without changing the stored recipe.
 ### How Parameters Interact
 
 **Sensitivity → Dye color:** `sensitizerPeak` determines what light the layer absorbs.
-`dyeHue` is auto-derived as the complement — a red-sensitive (620nm) layer forms cyan
-dye, green-sensitive (540nm) forms magenta, blue-sensitive (450nm) forms yellow.
+`dyeHue` starts as the complement — a red-sensitive (620nm) layer seeds cyan dye,
+green-sensitive (540nm) seeds magenta, blue-sensitive (450nm) seeds yellow — but
+the seed only runs once at layer creation. Real stocks tune the dye chemistry
+away from the strict mathematical complement (Portra's cyan ≈ 185°, not 195°),
+so the user is free to drag hue independently from peak.
 
 **H&D curve shape = toe + gamma + shoulder + fog + dmax:** These five parameters fully
 define the density response curve. Fog lifts the floor (Dmin). Toe and shoulder define
@@ -328,10 +348,10 @@ it into the working recipe, fully editable. There is no stock vs custom mode spl
 
 - **Layers tab** — Per-layer slider sections with chemistry controls:
   Sensitizer peak, Sensitizer bandwidth, Emulsion type toggle (Silver / Color dye),
-  Dye purity (color only), Dmax, collapsible H&D Curve (interactive canvas with
-  toe/gamma/shoulder drag handles + fog slider), Crystal size with derived ISO readout.
-  Layers can be added (up to 4), removed, and reordered. Selected layer is
-  highlighted and synced with spectrum pointer.
+  Dye hue + Dye purity (color only), Dmax, collapsible H&D Curve (interactive
+  canvas with toe/gamma/shoulder drag handles + fog slider), Crystal size with
+  derived ISO readout. Layers can be added (up to 4), removed, and reordered.
+  Selected layer is highlighted and synced with spectrum pointer.
 - **Base tab** — Global controls (reversal process, stacking, DIR, base tint)
   + orange mask section.
 - **Develop tab** — Development environment sliders + generated Lab Notes.
@@ -359,9 +379,10 @@ visible between the film strip and tab content. It is not rebuilt on tab switch.
 ### Film Strip
 
 Persistent horizontal scroll row between image and tab content. Stock template
-chips auto-grouped by derived type (B&W if all `dyePurity < 0.01`, reversal if
-`global.reversal`, else negative), user-saved films after a separator with delete
-affordance, "+ New" chip at the end.
+chips auto-grouped by derived type — Untouched (the bypass starter, first), then
+B&W if all `dyePurity < 0.01`, reversal if `global.reversal`, else negative —
+followed by user-saved films after a separator with delete affordance, and a
+"+ New" chip at the end. "+ New" loads the Untouched recipe.
 
 ### Topbar
 
@@ -386,7 +407,8 @@ Canvas layout (top to bottom):
   outlined white when selected
 
 Desktop-only interactions (hidden on `pointer: coarse`):
-- Drag pointer horizontally -> `sensitizerPeak` (auto-updates `dyeHue`)
+- Drag pointer horizontally -> `sensitizerPeak` (does NOT touch `dyeHue` — that
+  stays whatever the user last set in the layer editor)
 - Drag bell top vertically -> `dmax`
 - Drag bell edges horizontally -> `sensitizerBw`
 - Hover cursor changes to `ns-resize` / `ew-resize` / `grab`
@@ -434,9 +456,18 @@ Each layer has a collapsible "H&D Curve" section containing an interactive canva
   properties: `reversal` (global process), `dyePurity` (per-layer coupler presence),
   `maskDensity` (base property). This matches real film chemistry where these are
   independent properties, not a type selector.
-- **Auto-derived dyeHue** — `dyeHue = complementHue(sensitizerPeak)`. In real film,
-  the dye formed is always the spectral complement of the absorbed wavelength. This
-  is auto-updated on peak changes; `dyeHue` is not directly user-editable.
+- **Authored dyeHue** — `dyeHue` is seeded once via `complementHue(sensitizerPeak)`
+  at layer creation, but is then a hand-editable parameter. Earlier versions
+  re-derived it on every peak change; that was reverted because real stocks
+  intentionally drift the dye hue away from the strict mathematical complement
+  (Portra's warm cyan ≈ 185°, Velvia's slight push to ≈ 195°). The seed gives a
+  sensible starting point; the slider gives the final say.
+- **Bypass / "Untouched" starter** — every new recipe starts from an identity
+  preset with `global.bypass = 1`, which short-circuits the engine to a
+  passthrough of the source. This makes "load image, see image" the default.
+  The first user-driven slider/spectrum edit clears bypass automatically
+  (`clearBypassOnFirstEdit()`), and a press-and-hold-image gesture provides
+  an instant before/after at any time.
 - **3-wavelength spectral model** (625, 540, 450nm) — a deliberate trade-off.
   Full 380-700nm integration would cost ~20x more per pixel for marginal visual
   benefit. The effective useful range for custom layer peaks is ~440-620nm.

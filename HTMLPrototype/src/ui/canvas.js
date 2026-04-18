@@ -52,6 +52,39 @@ export function initCanvas(renderer, onRender) {
     loadImageFile(e.dataTransfer.files[0]);
   });
 
+  // Press-and-hold the rendered image to peek the original (bypass mode).
+  // Uses pointer events so it works for mouse, touch, and pen. Only arms
+  // when an image is loaded and the user is actually pressing on the
+  // canvas (not on a pill button). Mirrors the macOS viewer gesture.
+  const peekBadge = document.createElement('div');
+  peekBadge.className = 'peek-badge';
+  peekBadge.textContent = 'ORIGINAL';
+  canvasArea.appendChild(peekBadge);
+
+  function setPeek(on) {
+    if (state.peeking === on) return;
+    state.peeking = on;
+    peekBadge.classList.toggle('visible', on);
+    onRender();
+  }
+
+  let peekPointerId = null;
+  canvasArea.addEventListener('pointerdown', e => {
+    if (!imageLoaded) return;
+    if (e.target.closest('.pill-btn')) return;
+    peekPointerId = e.pointerId;
+    setPeek(true);
+  });
+  function releasePeek(e) {
+    if (peekPointerId !== null && (e == null || e.pointerId === peekPointerId)) {
+      peekPointerId = null;
+      setPeek(false);
+    }
+  }
+  canvasArea.addEventListener('pointerup', releasePeek);
+  canvasArea.addEventListener('pointercancel', releasePeek);
+  canvasArea.addEventListener('pointerleave', releasePeek);
+
   rawBtn.addEventListener('click', () => {
     state.rawMode = !state.rawMode;
     rawBtn.classList.toggle('active', state.rawMode);
